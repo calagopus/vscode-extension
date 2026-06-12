@@ -3,7 +3,7 @@
   "icon": "icon.png",
   "displayName": "Calagopus",
   "description": "Browse and edit Calagopus server files and access the server console directly from VS Code.",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "publisher": "calagopus",
   "license": "MIT",
   "repository": {

@@ -136,6 +136,22 @@ export class Session {
     return client;
   }
 
+  async signInWithKey(origin: string, apiKey: string): Promise<PanelClient | null> {
+    const candidate = new PanelClient({ origin: new URL(origin).origin, apiKey });
+    if (!(await this.verify(candidate))) {
+      return null;
+    }
+
+    await this.remember(candidate.origin, apiKey);
+    const client = this.makeClient(candidate.origin, apiKey);
+    this.clients.set(client.origin, client);
+    this.ephemeral.delete(client.origin);
+    this.didChangeEmitter.fire();
+
+    vscode.window.showInformationMessage(`Calagopus: signed in to ${client.origin}.`);
+    return client;
+  }
+
   private async verify(client: PanelClient): Promise<boolean> {
     try {
       await client.ping();
