@@ -49,6 +49,12 @@ export interface WebsocketCredentials {
   url: string;
 }
 
+export interface Account {
+  uuid: string;
+  username: string;
+  email: string;
+}
+
 export type PowerAction = 'start' | 'stop' | 'restart' | 'kill';
 
 export type PowerState = 'offline' | 'starting' | 'running' | 'stopping';
@@ -73,6 +79,19 @@ export interface PublicSettings {
     max_file_manager_search_results: number;
     container_prelude: string;
   };
+}
+
+export interface FileRevision {
+  id: number;
+  user: { username: string; avatar?: string | null } | null;
+  size: number;
+  is_snapshot: boolean;
+  created: string;
+}
+
+export interface CopyFile {
+  from: string;
+  to: string;
 }
 
 export interface FileSearchFilters {

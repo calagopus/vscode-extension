@@ -4,3 +4,5 @@ esbuild.mjs
 tsconfig.json
 *.map
 .gitignore
+.github/
+biome.json

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ApiError, type PanelClient } from '../api/client.ts';
 import type { DirectoryEntry } from '../api/types.ts';
+import type { CollabRegistry } from '../collab/collabManager.ts';
 import { log } from '../log.ts';
 import type { Session } from '../session.ts';
 import type { SettingsCache } from '../settings.ts';
@@ -91,6 +92,7 @@ export class CalagopusFileSystem implements vscode.FileSystemProvider {
   constructor(
     private readonly session: Session,
     private readonly settings: SettingsCache,
+    private readonly collab?: CollabRegistry,
   ) {}
 
   watch(): vscode.Disposable {
@@ -187,6 +189,10 @@ export class CalagopusFileSystem implements vscode.FileSystemProvider {
     content: Uint8Array,
     options: { create: boolean; overwrite: boolean },
   ): Promise<void> {
+    if (this.collab?.shouldSkipSave(uri)) {
+      return;
+    }
+
     const ref = refOf(uri);
     const { parent, name } = parentOf(uri.path);
 
@@ -203,6 +209,19 @@ export class CalagopusFileSystem implements vscode.FileSystemProvider {
     }
     if (!exists && !options.create) {
       throw vscode.FileSystemError.FileNotFound(uri);
+    }
+
+    if (this.collab?.hasSession(uri)) {
+      try {
+        await this.collab.saveViaCollab(uri);
+        this.invalidate(ref, parent);
+        this.didChangeEmitter.fire([
+          { type: exists ? vscode.FileChangeType.Changed : vscode.FileChangeType.Created, uri },
+        ]);
+        return;
+      } catch (err) {
+        log.warn(`fs write ${uri.toString()}: collab save failed, falling back to REST: ${err}`);
+      }
     }
 
     try {
@@ -339,10 +358,13 @@ export class CalagopusFileSystem implements vscode.FileSystemProvider {
           await this.copyViaTemp(srcClient, srcRef.server, source.path, srcParent, destination.path);
         }
       } else {
-        await srcClient.copyRemote(srcRef.server, srcParent, [srcName], destParent, destRef.server);
-        if (srcName !== destName) {
-          await destClient.rename(destRef.server, joinPath(destParent, srcName), destination.path);
-        }
+        await srcClient.copyRemote(
+          srcRef.server,
+          srcParent,
+          [{ from: srcName, to: destName }],
+          destParent,
+          destRef.server,
+        );
       }
     } catch (err) {
       log.error(`fs copy ${source.toString()} -> ${destination.toString()} failed: ${err}`);

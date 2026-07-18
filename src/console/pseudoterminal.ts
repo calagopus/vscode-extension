@@ -1,9 +1,8 @@
 import * as vscode from 'vscode';
 import type { PowerState } from '../api/types.ts';
 import { log } from '../log.ts';
-import type { Session } from '../session.ts';
 import type { SettingsCache } from '../settings.ts';
-import { ConsoleSocket } from './websocket.ts';
+import type { WingsSocketHub, WingsSocketLease } from '../wings/socketHub.ts';
 
 const DEFAULT_PRELUDE = 'container@calagopus~';
 
@@ -25,14 +24,14 @@ export class ConsolePseudoterminal implements vscode.Pseudoterminal {
   private readonly statusEmitter = new vscode.EventEmitter<PowerState>();
   readonly onDidChangeStatus = this.statusEmitter.event;
 
-  private socket: ConsoleSocket | null = null;
+  private socket: WingsSocketLease | null = null;
   private prelude = DEFAULT_PRELUDE;
   private input = '';
   private history: string[] = [];
   private historyIndex = -1;
 
   constructor(
-    private readonly session: Session,
+    private readonly hub: WingsSocketHub,
     private readonly settings: SettingsCache,
     private readonly origin: string,
     private readonly server: string,
@@ -48,10 +47,10 @@ export class ConsolePseudoterminal implements vscode.Pseudoterminal {
 
     this.addLine(`Connecting to ${this.serverName}...`, true);
 
-    const socket = new ConsoleSocket(this.session, this.origin, this.server);
+    const socket = this.hub.acquire(this.origin, this.server);
     this.socket = socket;
 
-    socket.on('auth success', () => {
+    socket.whenAuthenticated(() => {
       socket.send('send logs');
       socket.send('send status');
     });
@@ -89,12 +88,10 @@ export class ConsolePseudoterminal implements vscode.Pseudoterminal {
       log.error(`console [${this.serverName}]: ${err.message}`);
       this.addLine(`\x1b[1m\x1b[41m${err.message}\x1b[0m`, true);
     });
-
-    void socket.connect();
   }
 
   close(): void {
-    this.socket?.close();
+    this.socket?.release();
     this.socket = null;
     this.statusEmitter.dispose();
   }
@@ -186,13 +183,13 @@ export class ConsolePseudoterminal implements vscode.Pseudoterminal {
 }
 
 export function createConsoleTerminal(
-  session: Session,
+  hub: WingsSocketHub,
   settings: SettingsCache,
   origin: string,
   server: string,
   serverName: string,
 ): { terminal: vscode.Terminal; pty: ConsolePseudoterminal } {
-  const pty = new ConsolePseudoterminal(session, settings, origin, server, serverName);
+  const pty = new ConsolePseudoterminal(hub, settings, origin, server, serverName);
   const terminal = vscode.window.createTerminal({
     name: `Console: ${serverName}`,
     pty,

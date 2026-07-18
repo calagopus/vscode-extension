@@ -3,7 +3,7 @@
   "icon": "icon.png",
   "displayName": "Calagopus",
   "description": "Browse and edit Calagopus server files and access the server console directly from VS Code.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "calagopus",
   "license": "MIT",
   "repository": {
@@ -57,8 +57,108 @@
         "command": "calagopus.powerAction",
         "title": "Server Power Action",
         "category": "Calagopus"
+      },
+      {
+        "command": "calagopus.enableCollab",
+        "title": "Enable File Collaboration",
+        "category": "Calagopus"
+      },
+      {
+        "command": "calagopus.disableCollab",
+        "title": "Disable File Collaboration",
+        "category": "Calagopus"
+      },
+      {
+        "command": "calagopus.revisions.refresh",
+        "title": "Refresh File History",
+        "category": "Calagopus",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "calagopus.revisions.viewDiff",
+        "title": "View Diff Against Current File",
+        "category": "Calagopus",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "calagopus.revisions.compareToPrevious",
+        "title": "Compare to Previous Revision",
+        "category": "Calagopus",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "calagopus.revisions.restore",
+        "title": "Restore Revision into Editor",
+        "category": "Calagopus",
+        "icon": "$(discard)"
       }
     ],
+    "views": {
+      "explorer": [
+        {
+          "id": "calagopusRevisions",
+          "name": "File History",
+          "icon": "$(history)",
+          "when": "calagopus.workspaceMounted"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "calagopusRevisions",
+        "contents": "Open a Calagopus server file to browse its revision history."
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "calagopus.revisions.refresh",
+          "when": "view == calagopusRevisions",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "calagopus.revisions.viewDiff",
+          "when": "view == calagopusRevisions && viewItem =~ /^calagopusRevision/",
+          "group": "inline@1"
+        },
+        {
+          "command": "calagopus.revisions.compareToPrevious",
+          "when": "view == calagopusRevisions && viewItem == calagopusRevisionWithPrevious",
+          "group": "inline@2"
+        },
+        {
+          "command": "calagopus.revisions.restore",
+          "when": "view == calagopusRevisions && viewItem =~ /^calagopusRevision/",
+          "group": "inline@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "calagopus.revisions.viewDiff",
+          "when": "false"
+        },
+        {
+          "command": "calagopus.revisions.compareToPrevious",
+          "when": "false"
+        },
+        {
+          "command": "calagopus.revisions.restore",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Calagopus",
+      "properties": {
+        "calagopus.collaboration.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable real-time collaborative editing of server files. When multiple people open the same file, edits and cursors are shared live and saves are coordinated through the panel."
+        }
+      }
+    },
     "terminal": {
       "profiles": [
         {
@@ -82,15 +182,17 @@
     "biome:fix-unsafe": "biome format --write --css-parse-tailwind-directives=true && biome lint --write --css-parse-tailwind-directives=true && biome check --write --unsafe"
   },
   "dependencies": {
-    "ws": "^8.21.0"
+    "ws": "^8.21.1",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.31"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.16",
-    "@types/node": "^20.19.42",
-    "@types/vscode": "^1.120.0",
+    "@types/node": "^20.19.43",
+    "@types/vscode": "1.120.0",
     "@types/ws": "^8.18.1",
-    "esbuild": "^0.28.0",
-    "typescript": "^5.9.3"
+    "esbuild": "^0.28.1",
+    "typescript": "^7.0.2"
   },
   "enabledApiProposals": [
     "textSearchProvider2",

@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
+import { CollabManager } from './collab/collabManager.ts';
 import { ConsolePseudoterminal, createConsoleTerminal } from './console/pseudoterminal.ts';
 import { CalagopusFileSystem } from './fs/fileSystemProvider.ts';
 import { log } from './log.ts';
+import { registerRevisionsView } from './revisions/revisionsView.ts';
 import { CalagopusFileSearchProvider, CalagopusTextSearchProvider } from './search/searchProvider.ts';
 import {
   type MountedServer,
@@ -21,6 +23,7 @@ import {
   PENDING_EXPLORER_KEY,
   PENDING_FILE_KEY,
 } from './uriHandler.ts';
+import { WingsSocketHub } from './wings/socketHub.ts';
 
 export function activate(context: vscode.ExtensionContext): void {
   log.info(
@@ -32,9 +35,11 @@ export function activate(context: vscode.ExtensionContext): void {
   const session = new Session(context.secrets);
   const settings = new SettingsCache(session);
   const statusBar = new ServerStatusBar(session);
+  const socketHub = new WingsSocketHub(session);
+  const collab = new CollabManager(socketHub, session);
 
   const openConsoleFor = (server: MountedServer): vscode.Terminal => {
-    const { terminal } = createConsoleTerminal(session, settings, server.origin, server.uuid, server.name);
+    const { terminal } = createConsoleTerminal(socketHub, settings, server.origin, server.uuid, server.name);
     statusBar.pin(server.origin, server.uuid, server.name);
     terminal.show();
     return terminal;
@@ -51,13 +56,22 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     log,
     statusBar,
+    collab,
+    { dispose: () => socketHub.dispose() },
 
-    vscode.workspace.registerFileSystemProvider('calagopus', new CalagopusFileSystem(session, settings), {
+    vscode.workspace.registerFileSystemProvider('calagopus', new CalagopusFileSystem(session, settings, collab), {
       isCaseSensitive: true,
     }),
 
     vscode.window.registerUriHandler(new CalagopusUriHandler(session, context.globalState, openConsoleFor)),
+
+    ...registerRevisionsView(session),
   );
+
+  const updateMountedContext = () =>
+    vscode.commands.executeCommand('setContext', 'calagopus.workspaceMounted', workspaceServers().length > 0);
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(updateMountedContext));
+  void updateMountedContext();
 
   try {
     context.subscriptions.push(
@@ -77,7 +91,7 @@ export function activate(context: vscode.ExtensionContext): void {
           throw new Error('No server selected.');
         }
 
-        const pty = new ConsolePseudoterminal(session, settings, server.origin, server.uuid, server.name);
+        const pty = new ConsolePseudoterminal(socketHub, settings, server.origin, server.uuid, server.name);
         statusBar.pin(server.origin, server.uuid, server.name);
 
         return new vscode.TerminalProfile({
@@ -124,8 +138,10 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('calagopus.openConsole', () => openConsole()),
-
     vscode.commands.registerCommand('calagopus.powerAction', () => statusBar.showPowerActions()),
+
+    vscode.commands.registerCommand('calagopus.enableCollab', () => setCollabEnabled(true)),
+    vscode.commands.registerCommand('calagopus.disableCollab', () => setCollabEnabled(false)),
   );
 
   const restored = workspaceServers()[0];
@@ -140,6 +156,13 @@ export function activate(context: vscode.ExtensionContext): void {
   })();
 
   log.info('activated');
+}
+
+async function setCollabEnabled(enabled: boolean): Promise<void> {
+  await vscode.workspace
+    .getConfiguration()
+    .update('calagopus.collaboration.enabled', enabled, vscode.ConfigurationTarget.Global);
+  vscode.window.showInformationMessage(`Calagopus: collaboration ${enabled ? 'enabled' : 'disabled'}.`);
 }
 
 async function resumePendingExplorer(context: vscode.ExtensionContext): Promise<void> {

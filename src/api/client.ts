@@ -1,6 +1,9 @@
 import type {
+  Account,
+  CopyFile,
   DirectoryEntry,
   DirectoryListResponse,
+  FileRevision,
   FileSearchFilters,
   Pagination,
   PowerAction,
@@ -94,6 +97,11 @@ export class PanelClient {
     return this.json<PublicSettings>('/api/settings');
   }
 
+  async getAccount(): Promise<Account> {
+    const { user } = await this.json<{ user: Account }>('/api/client/account');
+    return user;
+  }
+
   private async fetchAll<R, T>(buildPath: (page: number) => string, select: (body: R) => Pagination<T>): Promise<T[]> {
     const items: T[] = [];
     for (let page = 1; ; page++) {
@@ -152,6 +160,19 @@ export class PanelClient {
       throw await apiError(response);
     }
 
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
+  async getFileRevisions(server: string, file: string): Promise<FileRevision[]> {
+    const params = new URLSearchParams({ file });
+    const { revisions } = await this.json<{ revisions: FileRevision[] }>(
+      `/api/client/servers/${server}/files/revisions?${params}`,
+    );
+    return revisions;
+  }
+
+  async getFileRevisionContent(server: string, revision: number): Promise<Uint8Array> {
+    const response = await this.request(`/api/client/servers/${server}/files/revisions/${revision}`);
     return new Uint8Array(await response.arrayBuffer());
   }
 
@@ -231,7 +252,7 @@ export class PanelClient {
   async copyRemote(
     server: string,
     root: string,
-    files: string[],
+    files: CopyFile[],
     destination: string,
     destinationServer: string,
   ): Promise<void> {

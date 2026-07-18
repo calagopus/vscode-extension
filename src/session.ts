@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ApiError, PanelClient } from './api/client.ts';
+import { provisionApiKey } from './auth.ts';
 import { log } from './log.ts';
 
 const ORIGINS_KEY = 'calagopus.origins';
@@ -97,30 +98,17 @@ export class Session {
       return null;
     }
 
-    const apiKey = await vscode.window.showInputBox({
-      title: 'Calagopus: API Key',
-      prompt: 'A client API key (Account Settings -> API Keys)',
-      password: true,
-      ignoreFocusOut: true,
-      validateInput: (value) => (value.trim().length === 0 ? 'API key is required' : null),
-    });
-    if (!apiKey) {
+    return this.provisionSignIn(origin);
+  }
+
+  async provisionSignIn(origin: string): Promise<PanelClient | null> {
+    const normalized = new URL(origin).origin;
+    const key = await provisionApiKey(normalized);
+    if (!key) {
+      log.info(`session: authentication for ${normalized} was cancelled or timed out`);
       return null;
     }
-
-    const candidate = new PanelClient({ origin: new URL(origin).origin, apiKey: apiKey.trim() });
-    if (!(await this.verify(candidate))) {
-      return null;
-    }
-
-    await this.remember(candidate.origin, apiKey.trim());
-    const client = this.makeClient(candidate.origin, apiKey.trim());
-    this.clients.set(client.origin, client);
-    this.ephemeral.delete(client.origin);
-    this.didChangeEmitter.fire();
-
-    vscode.window.showInformationMessage(`Calagopus: signed in to ${client.origin}.`);
-    return client;
+    return this.signInWithKey(normalized, key);
   }
 
   async ephemeralClient(origin: string, apiKey: string): Promise<PanelClient | null> {
