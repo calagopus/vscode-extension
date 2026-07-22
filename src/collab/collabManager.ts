@@ -1,11 +1,20 @@
 import * as vscode from 'vscode';
-import { refOf } from '../fs/fileSystemProvider.ts';
+import { decodeAuthority, refOf } from '../fs/fileSystemProvider.ts';
 import { log } from '../log.ts';
 import type { Session } from '../session.ts';
 import type { WingsSocketHub } from '../wings/socketHub.ts';
-import { type CollabParticipant, CollabSession } from './session.ts';
+import { CollabConflictError, type CollabParticipant, CollabSession } from './session.ts';
 
 const CONFIG_KEY = 'calagopus.collaboration.enabled';
+const DISK_SCHEME = 'calagopus-collab-disk';
+
+const VIEW_DIFF = 'View Diff';
+const LOAD_DISK = 'Load Disk Version';
+const KEEP_EDITOR = 'Keep Editor Version';
+
+function basename(path: string): string {
+  return path.slice(path.lastIndexOf('/') + 1);
+}
 
 export interface CollabRegistry {
   hasSession(uri: vscode.Uri): boolean;
@@ -18,6 +27,7 @@ export class CollabManager implements CollabRegistry, vscode.FileDecorationProvi
   private readonly participants = new Map<string, CollabParticipant[]>();
   private readonly usernames = new Map<string, string>();
   private readonly starting = new Set<string>();
+  private readonly conflictPrompts = new Set<string>();
   private readonly saveReasons = new Map<string, vscode.TextDocumentSaveReason>();
   private readonly disposables: vscode.Disposable[] = [];
   private readonly statusItem: vscode.StatusBarItem;
@@ -40,6 +50,13 @@ export class CollabManager implements CollabRegistry, vscode.FileDecorationProvi
       this.statusItem,
       this.decorationsEmitter,
       vscode.window.registerFileDecorationProvider(this),
+      vscode.workspace.registerTextDocumentContentProvider(DISK_SCHEME, {
+        provideTextDocumentContent: async (uri) => {
+          const { origin, server } = decodeAuthority(uri.authority);
+          const client = await this.session.client(origin);
+          return new TextDecoder().decode(await client.readFile(server, uri.path));
+        },
+      }),
       vscode.workspace.onDidOpenTextDocument((doc) => this.maybeStart(doc)),
       vscode.workspace.onWillSaveTextDocument((e) => {
         if (e.document.uri.scheme === 'calagopus') {
@@ -97,7 +114,20 @@ export class CollabManager implements CollabRegistry, vscode.FileDecorationProvi
     if (!session) {
       throw new Error('no collaboration session for this file');
     }
-    await session.save();
+
+    if (session.conflict) {
+      void this.promptConflict(uri);
+      throw new CollabConflictError(session.conflict);
+    }
+
+    try {
+      await session.save();
+    } catch (err) {
+      if (err instanceof CollabConflictError) {
+        void this.promptConflict(uri);
+      }
+      throw err;
+    }
   }
 
   private readEnabled(): boolean {
@@ -169,6 +199,12 @@ export class CollabManager implements CollabRegistry, vscode.FileDecorationProvi
         this.refreshStatus();
       },
       onDirtyChange: () => this.decorationsEmitter.fire(document.uri),
+      onConflict: (conflict) => {
+        this.decorationsEmitter.fire(document.uri);
+        if (conflict) {
+          void this.promptConflict(document.uri);
+        }
+      },
       onError: (message) => {
         log.warn(`collab [${key}]: ${message}`);
       },
@@ -191,6 +227,15 @@ export class CollabManager implements CollabRegistry, vscode.FileDecorationProvi
 
   provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
     const session = this.sessions.get(uri.toString());
+    if (session?.conflict) {
+      return {
+        badge: '!',
+        tooltip: session.conflict.deleted
+          ? 'File deleted on disk outside of the editor'
+          : 'File changed on disk outside of the editor',
+        color: new vscode.ThemeColor('list.warningForeground'),
+      };
+    }
     if (!session?.isDirty) {
       return undefined;
     }
@@ -199,6 +244,81 @@ export class CollabManager implements CollabRegistry, vscode.FileDecorationProvi
       tooltip: 'Unsaved collaborative changes',
       color: new vscode.ThemeColor('gitDecoration.modifiedResourceForeground'),
     };
+  }
+
+  private async promptConflict(uri: vscode.Uri): Promise<void> {
+    const key = uri.toString();
+    if (this.conflictPrompts.has(key)) {
+      return;
+    }
+    this.conflictPrompts.add(key);
+    try {
+      const name = basename(uri.path);
+
+      for (;;) {
+        const session = this.sessions.get(key);
+        const conflict = session?.conflict;
+        if (!session || !conflict) {
+          return;
+        }
+
+        const message = conflict.deleted
+          ? `Calagopus: "${name}" was deleted on disk outside of the editor.`
+          : `Calagopus: "${name}" was changed on disk outside of the editor (e.g. via SFTP).`;
+        const actions = conflict.deleted ? [KEEP_EDITOR] : [VIEW_DIFF, LOAD_DISK, KEEP_EDITOR];
+
+        const picked = await vscode.window.showWarningMessage(message, ...actions);
+        const current = this.sessions.get(key);
+        if (!picked || !current?.conflict) {
+          return;
+        }
+
+        switch (picked) {
+          case VIEW_DIFF: {
+            const diskUri = uri.with({
+              scheme: DISK_SCHEME,
+              query: `disk=${current.conflict.hash ?? Date.now()}`,
+            });
+            await vscode.commands.executeCommand('vscode.diff', diskUri, uri, `${name} (Disk ↔ Editor)`);
+            continue;
+          }
+          case LOAD_DISK: {
+            if (await this.confirmLoadDisk(key, name)) {
+              current.reload();
+              return;
+            }
+            continue;
+          }
+          case KEEP_EDITOR: {
+            try {
+              await current.save({ force: true, expectedHash: current.conflict.hash });
+            } catch (err) {
+              if (!(err instanceof CollabConflictError)) {
+                vscode.window.showErrorMessage(`Calagopus: could not save "${name}": ${err}`);
+              }
+            }
+            return;
+          }
+        }
+      }
+    } finally {
+      this.conflictPrompts.delete(key);
+    }
+  }
+
+  private async confirmLoadDisk(key: string, name: string): Promise<boolean> {
+    const participants = this.participants.get(key)?.length ?? 0;
+    const detail =
+      participants > 1
+        ? `This will replace the editor contents for all ${participants} people in this session with the file currently on disk. Unsaved changes will be lost.`
+        : 'This will replace the editor contents with the file currently on disk. Unsaved changes will be lost.';
+
+    const picked = await vscode.window.showWarningMessage(
+      `Load the disk version of "${name}"?`,
+      { modal: true, detail },
+      LOAD_DISK,
+    );
+    return picked === LOAD_DISK;
   }
 
   private async resolveUsername(origin: string): Promise<string> {

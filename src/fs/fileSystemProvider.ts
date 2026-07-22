@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { ApiError, type PanelClient } from '../api/client.ts';
 import type { DirectoryEntry } from '../api/types.ts';
 import type { CollabRegistry } from '../collab/collabManager.ts';
+import { CollabConflictError } from '../collab/session.ts';
 import { log } from '../log.ts';
 import type { Session } from '../session.ts';
 import type { SettingsCache } from '../settings.ts';
@@ -220,6 +221,12 @@ export class CalagopusFileSystem implements vscode.FileSystemProvider {
         ]);
         return;
       } catch (err) {
+        // A conflict must never fall back to a REST write — that would
+        // silently overwrite the external disk edit the daemon just rejected
+        // the save to protect. Keep the document dirty instead.
+        if (err instanceof CollabConflictError) {
+          throw err;
+        }
         log.warn(`fs write ${uri.toString()}: collab save failed, falling back to REST: ${err}`);
       }
     }

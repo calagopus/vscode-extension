@@ -20,10 +20,27 @@ export interface CollabParticipant {
   avatar: string | null;
 }
 
+export interface CollabConflict {
+  hash: string | null;
+  deleted: boolean;
+}
+
+export class CollabConflictError extends Error {
+  constructor(readonly conflict: CollabConflict) {
+    super(
+      conflict.deleted
+        ? 'The file was deleted on disk outside of this session. Resolve the conflict from the Calagopus notification.'
+        : 'The file was changed on disk outside of this session. Resolve the conflict from the Calagopus notification.',
+    );
+    this.name = 'CollabConflictError';
+  }
+}
+
 export interface SessionCallbacks {
   onActiveChange: () => void;
   onParticipants: (participants: CollabParticipant[]) => void;
   onDirtyChange: () => void;
+  onConflict: (conflict: CollabConflict | null) => void;
   onError: (message: string) => void;
 }
 
@@ -38,6 +55,7 @@ export class CollabSession {
   private disposed = false;
   private dirty = false;
   private localEdits = false;
+  private conflictState: CollabConflict | null = null;
   private readonly pendingSaves = new Set<{
     resolve: () => void;
     reject: (err: Error) => void;
@@ -59,6 +77,7 @@ export class CollabSession {
     this.lease.on('file collab awareness', this.onAwareness);
     this.lease.on('file collab participants', this.onParticipants);
     this.lease.on('file collab saved', this.onSaved);
+    this.lease.on('file collab conflict', this.onConflictEvent);
     this.lease.on('file collab error', this.onErrorEvent);
 
     this.lease.on('CONNECTION_STATE', (state: string) => {
@@ -88,12 +107,27 @@ export class CollabSession {
     return this.localEdits;
   }
 
+  get conflict(): CollabConflict | null {
+    return this.conflictState;
+  }
+
   private setDirty(value: boolean): void {
     if (this.dirty === value) {
       return;
     }
     this.dirty = value;
     this.callbacks.onDirtyChange();
+  }
+
+  private setConflict(value: CollabConflict | null): void {
+    const current = this.conflictState;
+    const unchanged =
+      current === value || (!!current && !!value && current.hash === value.hash && current.deleted === value.deleted);
+    if (unchanged) {
+      return;
+    }
+    this.conflictState = value;
+    this.callbacks.onConflict(value);
   }
 
   dispose(): void {
@@ -113,7 +147,7 @@ export class CollabSession {
     this.lease.release();
   }
 
-  save(): Promise<void> {
+  save(options?: { force?: boolean; expectedHash?: string | null }): Promise<void> {
     if (!this.active) {
       return Promise.reject(new Error('collaboration is not active for this file'));
     }
@@ -127,8 +161,23 @@ export class CollabSession {
         }, SAVE_TIMEOUT_MS),
       };
       this.pendingSaves.add(pending);
-      this.lease.send('file collab save', [this.path]);
+
+      const args = [this.path];
+      if (options?.force) {
+        args.push('1');
+        if (options.expectedHash) {
+          args.push(options.expectedHash);
+        }
+      }
+      this.lease.send('file collab save', args);
     });
+  }
+
+  reload(): void {
+    if (!this.subscribed) {
+      return;
+    }
+    this.lease.send('file collab reload', [this.path]);
   }
 
   private matches(path: string): boolean {
@@ -141,12 +190,16 @@ export class CollabSession {
     }
 
     let dirty = false;
+    let conflict: CollabConflict | null = null;
     try {
-      dirty = Boolean(JSON.parse(meta ?? '{}').dirty);
+      const parsed = JSON.parse(meta ?? '{}');
+      dirty = Boolean(parsed.dirty);
+      conflict = parsed.conflict ?? null;
     } catch {
       // ignore
     }
     this.setDirty(dirty);
+    this.setConflict(conflict);
     this.localEdits = false;
 
     this.destroyDoc();
@@ -215,12 +268,36 @@ export class CollabSession {
       return;
     }
     this.setDirty(false);
+    this.setConflict(null);
     this.localEdits = false;
     for (const pending of this.pendingSaves) {
       clearTimeout(pending.timer);
       pending.resolve();
     }
     this.pendingSaves.clear();
+  };
+
+  private onConflictEvent = (conflictPath: string, data?: string): void => {
+    if (this.disposed || !this.matches(conflictPath)) {
+      return;
+    }
+
+    let conflict: CollabConflict | null = null;
+    try {
+      conflict = (JSON.parse(data ?? 'null') as CollabConflict | null) ?? null;
+    } catch {
+      // ignore
+    }
+
+    if (conflict) {
+      const error = new CollabConflictError(conflict);
+      for (const pending of this.pendingSaves) {
+        clearTimeout(pending.timer);
+        pending.reject(error);
+      }
+      this.pendingSaves.clear();
+    }
+    this.setConflict(conflict);
   };
 
   private onErrorEvent = (errorPath: string, message: string): void => {
@@ -231,6 +308,7 @@ export class CollabSession {
     const wasActive = this.doc !== null;
     this.destroyDoc();
     this.setDirty(false);
+    this.setConflict(null);
 
     for (const pending of this.pendingSaves) {
       clearTimeout(pending.timer);
