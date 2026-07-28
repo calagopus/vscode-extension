@@ -46,6 +46,15 @@ export interface Credentials {
 export type ReauthHandler = (client: PanelClient) => Promise<boolean>;
 
 export const UPLOAD_CHUNK_BYTES = 95 * 1024 * 1024;
+const UPLOAD_RECOVERY_LIMIT = 3;
+
+function parseUploadOffset(value: string | null): number | null {
+  if (value === null) {
+    return null;
+  }
+  const offset = Number(value.trim());
+  return Number.isInteger(offset) && offset >= 0 ? offset : null;
+}
 
 export class PanelClient {
   readonly origin: string;
@@ -191,40 +200,18 @@ export class PanelClient {
   }
 
   async uploadFile(server: string, directory: string, name: string, content: Uint8Array): Promise<void> {
-    const baseUrl = await this.getUploadUrl(server, directory);
     const total = content.byteLength;
 
     if (total <= UPLOAD_CHUNK_BYTES) {
-      await this.uploadChunk(baseUrl, name, content);
+      const url = `${await this.getUploadUrl(server, directory)}&total_size=${total}`;
+      await this.postUpload(url, name, content);
       return;
     }
 
-    let offset = 0;
-    let continuationToken: string | undefined;
-    while (offset < total) {
-      const end = Math.min(offset + UPLOAD_CHUNK_BYTES, total);
-      const isLast = end >= total;
-
-      const url = new URL(baseUrl);
-      if (!isLast) {
-        url.searchParams.set('wants_continue', '0');
-      }
-      if (continuationToken !== undefined) {
-        url.searchParams.set('continuation_token', continuationToken);
-      }
-
-      const token = await this.uploadChunk(url.toString(), name, content.subarray(offset, end));
-      if (!isLast) {
-        if (!token) {
-          throw new ApiError(500, 'wings did not return a continuation token for a non-final chunk');
-        }
-        continuationToken = token;
-      }
-      offset = end;
-    }
+    await this.resumableUpload(server, directory, name, content);
   }
 
-  private async uploadChunk(url: string, name: string, content: Uint8Array): Promise<string | null> {
+  private async postUpload(url: string, name: string, content: Uint8Array): Promise<void> {
     const form = new FormData();
     form.append('files', new Blob([content]), name);
 
@@ -232,20 +219,77 @@ export class PanelClient {
     if (!response.ok) {
       throw await apiError(response);
     }
+  }
 
-    try {
-      const body = (await response.json()) as { continuation_token?: string };
-      return body.continuation_token ?? null;
-    } catch {
-      return null;
+  private async resumableUpload(server: string, directory: string, name: string, content: Uint8Array): Promise<void> {
+    const total = content.byteLength;
+    const path = directory === '/' ? `/${name}` : `${directory}/${name}`;
+    const refreshUrl = async () => `${await this.getUploadUrl(server, directory)}&file=${encodeURIComponent(name)}`;
+
+    let url = await refreshUrl();
+
+    if ((await this.headUploadOffset(url)) !== 0) {
+      await this.delete(server, [path]);
+      url = await refreshUrl();
+    }
+
+    let offset = 0;
+    let recoveries = 0;
+    while (offset < total) {
+      const sliceStart = offset;
+      const end = Math.min(sliceStart + UPLOAD_CHUNK_BYTES, total);
+      const isLast = end >= total;
+
+      const response = await fetch(url, {
+        method: 'PATCH',
+        body: content.subarray(sliceStart, end),
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/offset+octet-stream',
+          'Upload-Offset': String(sliceStart),
+          'Upload-Length': String(total),
+          ...(isLast ? { 'Upload-Complete': '?1' } : {}),
+        },
+      });
+
+      if (response.ok) {
+        offset = parseUploadOffset(response.headers.get('Upload-Offset')) ?? end;
+        recoveries = 0;
+        continue;
+      }
+
+      if (response.status === 401 && recoveries < UPLOAD_RECOVERY_LIMIT) {
+        recoveries++;
+        url = await refreshUrl();
+        continue;
+      }
+
+      if (response.status === 409 && recoveries < UPLOAD_RECOVERY_LIMIT) {
+        const resumed = parseUploadOffset(response.headers.get('Upload-Offset'));
+        if (resumed !== null && resumed <= total) {
+          recoveries++;
+          offset = resumed;
+          continue;
+        }
+      }
+
+      throw await apiError(response);
     }
   }
 
-  async copy(server: string, path: string, name: string): Promise<void> {
+  private async headUploadOffset(url: string): Promise<number> {
+    const response = await fetch(url, { method: 'HEAD' });
+    if (!response.ok) {
+      return 0;
+    }
+    return parseUploadOffset(response.headers.get('Upload-Offset')) ?? 0;
+  }
+
+  async copy(server: string, path: string, name: string, overwrite = false): Promise<void> {
     await this.request(`/api/client/servers/${server}/files/copy`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path, destination: name, foreground: true }),
+      body: JSON.stringify({ path, destination: name, overwrite, foreground: true }),
     });
   }
 

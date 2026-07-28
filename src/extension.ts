@@ -142,6 +142,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand('calagopus.enableCollab', () => setCollabEnabled(true)),
     vscode.commands.registerCommand('calagopus.disableCollab', () => setCollabEnabled(false)),
+    vscode.commands.registerCommand('calagopus.revertToDisk', (uri?: vscode.Uri) => collab.revertToDisk(uri)),
   );
 
   const restored = workspaceServers()[0];

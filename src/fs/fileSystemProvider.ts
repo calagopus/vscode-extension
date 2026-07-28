@@ -77,6 +77,8 @@ function translateError(err: unknown, uri: vscode.Uri): Error {
       case 401:
       case 403:
         return vscode.FileSystemError.NoPermissions(uri);
+      case 409:
+        return vscode.FileSystemError.FileExists(uri);
       case 413:
         return vscode.FileSystemError.Unavailable(`${uri.path}: file exceeds the panel's maximum viewable size`);
     }
@@ -360,7 +362,7 @@ export class CalagopusFileSystem implements vscode.FileSystemProvider {
         );
       } else if (srcRef.server === destRef.server) {
         if (srcParent === destParent) {
-          await srcClient.copy(srcRef.server, source.path, destName);
+          await srcClient.copy(srcRef.server, source.path, destName, options.overwrite);
         } else {
           await this.copyViaTemp(srcClient, srcRef.server, source.path, srcParent, destination.path);
         }

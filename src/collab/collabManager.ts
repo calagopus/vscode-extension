@@ -130,6 +130,30 @@ export class CollabManager implements CollabRegistry, vscode.FileDecorationProvi
     }
   }
 
+  async revertToDisk(uri?: vscode.Uri): Promise<void> {
+    const target = uri ?? vscode.window.activeTextEditor?.document.uri;
+    if (!target || target.scheme !== 'calagopus') {
+      vscode.window.showInformationMessage('Calagopus: open a server file to revert it to the version on disk.');
+      return;
+    }
+
+    const key = target.toString();
+    const session = this.sessions.get(key);
+    if (!session?.active) {
+      vscode.window.showInformationMessage('Calagopus: collaboration is not active for this file.');
+      return;
+    }
+    if (session.conflict?.deleted) {
+      vscode.window.showWarningMessage('Calagopus: this file no longer exists on disk.');
+      return;
+    }
+
+    const name = basename(target.path);
+    if (await this.confirmLoadDisk(key, name)) {
+      this.sessions.get(key)?.reload();
+    }
+  }
+
   private readEnabled(): boolean {
     return vscode.workspace.getConfiguration().get<boolean>(CONFIG_KEY, true);
   }
@@ -203,6 +227,11 @@ export class CollabManager implements CollabRegistry, vscode.FileDecorationProvi
         this.decorationsEmitter.fire(document.uri);
         if (conflict) {
           void this.promptConflict(document.uri);
+        }
+      },
+      onSaved: (revisionId) => {
+        if (revisionId !== null && vscode.window.activeTextEditor?.document.uri.toString() === key) {
+          void vscode.commands.executeCommand('calagopus.revisions.refresh');
         }
       },
       onError: (message) => {

@@ -3,7 +3,7 @@
   "icon": "icon.png",
   "displayName": "Calagopus",
   "description": "Browse and edit Calagopus server files and access the server console directly from VS Code.",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "publisher": "calagopus",
   "license": "MIT",
   "repository": {
@@ -67,6 +67,12 @@
         "command": "calagopus.disableCollab",
         "title": "Disable File Collaboration",
         "category": "Calagopus"
+      },
+      {
+        "command": "calagopus.revertToDisk",
+        "title": "Revert File to Version on Disk",
+        "category": "Calagopus",
+        "icon": "$(discard)"
       },
       {
         "command": "calagopus.revisions.refresh",

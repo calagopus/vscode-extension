@@ -10,6 +10,8 @@ import { TextBinding } from './textBinding.ts';
 const UPDATE_CHUNK_SIZE = 16 * 1024;
 const SAVE_TIMEOUT_MS = 15_000;
 
+let nextEditorId = 0;
+
 function normalizePath(path: string): string {
   return path.replace(/^\/+/, '');
 }
@@ -41,6 +43,7 @@ export interface SessionCallbacks {
   onParticipants: (participants: CollabParticipant[]) => void;
   onDirtyChange: () => void;
   onConflict: (conflict: CollabConflict | null) => void;
+  onSaved: (revisionId: number | null) => void;
   onError: (message: string) => void;
 }
 
@@ -63,6 +66,7 @@ export class CollabSession {
   }>();
 
   private readonly path: string;
+  private readonly editorId = String(++nextEditorId);
 
   constructor(
     private readonly lease: WingsSocketLease,
@@ -91,7 +95,7 @@ export class CollabSession {
       }
       this.subscribedThisConnection = true;
       this.subscribed = true;
-      this.lease.send('file collab subscribe', [this.path]);
+      this.lease.send('file collab subscribe', [this.path, this.editorId]);
     });
   }
 
@@ -140,10 +144,10 @@ export class CollabSession {
       pending.reject(new Error('collaboration session closed'));
     }
     this.pendingSaves.clear();
-    if (this.subscribed) {
-      this.lease.send('file collab unsubscribe', [this.path]);
-    }
     this.destroyDoc();
+    if (this.subscribed) {
+      this.lease.send('file collab unsubscribe', [this.path, this.editorId]);
+    }
     this.lease.release();
   }
 
@@ -201,6 +205,12 @@ export class CollabSession {
     this.setDirty(dirty);
     this.setConflict(conflict);
     this.localEdits = false;
+
+    for (const pending of this.pendingSaves) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('the collaboration session resynced before the save completed'));
+    }
+    this.pendingSaves.clear();
 
     this.destroyDoc();
 
@@ -263,7 +273,7 @@ export class CollabSession {
     }
   };
 
-  private onSaved = (savedPath: string, _data: string): void => {
+  private onSaved = (savedPath: string, data: string): void => {
     if (!this.matches(savedPath)) {
       return;
     }
@@ -275,6 +285,14 @@ export class CollabSession {
       pending.resolve();
     }
     this.pendingSaves.clear();
+
+    let revisionId: number | null = null;
+    try {
+      revisionId = (JSON.parse(data) as { revision_id?: number | null }).revision_id ?? null;
+    } catch {
+      // ignore
+    }
+    this.callbacks.onSaved(revisionId);
   };
 
   private onConflictEvent = (conflictPath: string, data?: string): void => {
@@ -317,7 +335,7 @@ export class CollabSession {
     this.pendingSaves.clear();
 
     if (message === 'resync' || wasActive) {
-      this.lease.send('file collab subscribe', [this.path]);
+      this.lease.send('file collab subscribe', [this.path, this.editorId]);
       if (message !== 'resync') {
         this.callbacks.onError(message);
       }
@@ -334,7 +352,12 @@ export class CollabSession {
     const encoded = toBase64(update);
     for (let i = 0; i < encoded.length; i += UPDATE_CHUNK_SIZE) {
       const finished = i + UPDATE_CHUNK_SIZE >= encoded.length;
-      this.lease.send('file collab update', [this.path, finished ? '1' : '0', encoded.slice(i, i + UPDATE_CHUNK_SIZE)]);
+      this.lease.send('file collab update', [
+        this.path,
+        finished ? '1' : '0',
+        encoded.slice(i, i + UPDATE_CHUNK_SIZE),
+        this.editorId,
+      ]);
     }
   }
 
