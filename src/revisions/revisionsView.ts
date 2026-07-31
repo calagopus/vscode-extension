@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
 import type { FileRevision } from '../api/types.ts';
+import { formatBytes } from '../format.ts';
 import { decodeAuthority, refOf } from '../fs/fileSystemProvider.ts';
 import { log } from '../log.ts';
+import { basename } from '../paths.ts';
 import type { Session } from '../session.ts';
 
 export const REVISION_SCHEME = 'calagopus-revision';
@@ -11,22 +13,6 @@ function revisionUri(fileUri: vscode.Uri, revisionId: number): vscode.Uri {
     scheme: REVISION_SCHEME,
     query: `revision=${revisionId}`,
   });
-}
-
-function basename(path: string): string {
-  return path.slice(path.lastIndexOf('/') + 1);
-}
-
-function formatBytes(bytes: number): string {
-  const units = ['B', 'KiB', 'MiB', 'GiB'];
-  let value = bytes;
-  let unit = units[0];
-  for (const next of units.slice(1)) {
-    if (value < 1024) break;
-    value /= 1024;
-    unit = next;
-  }
-  return unit === 'B' ? `${value} B` : `${value.toFixed(1)} ${unit}`;
 }
 
 function formatWhen(iso: string): string {
@@ -46,7 +32,7 @@ class RevisionContentProvider implements vscode.TextDocumentContentProvider {
     const { origin, server } = decodeAuthority(uri.authority);
     const revision = Number(new URLSearchParams(uri.query).get('revision'));
     const client = await this.session.client(origin);
-    return new TextDecoder().decode(await client.getFileRevisionContent(server, revision));
+    return new TextDecoder().decode(await client.getFileRevisionContent(server, revision, uri.path));
   }
 }
 
@@ -146,7 +132,9 @@ export function registerRevisionsView(session: Session): vscode.Disposable[] {
     const { origin, server } = refOf(item.fileUri);
     try {
       const client = await session.client(origin);
-      const content = new TextDecoder().decode(await client.getFileRevisionContent(server, item.revision.id));
+      const content = new TextDecoder().decode(
+        await client.getFileRevisionContent(server, item.revision.id, item.fileUri.path),
+      );
       const document = await vscode.workspace.openTextDocument(item.fileUri);
       const edit = new vscode.WorkspaceEdit();
       const fullRange = new vscode.Range(new vscode.Position(0, 0), document.positionAt(document.getText().length));

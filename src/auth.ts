@@ -7,7 +7,13 @@ const CREATE_KEY_PATH = '/account/api-keys/create';
 
 const CREATE_KEY_NAME = 'VS Code';
 const CREATE_KEY_ADMIN_PERMISSIONS = ['servers.read'];
-const CREATE_KEY_USER_PERMISSIONS = ['servers.read'];
+const CREATE_KEY_USER_PERMISSIONS = [
+  'servers.read',
+  'command-snippets.read',
+  'command-snippets.create',
+  'command-snippets.update',
+  'command-snippets.delete',
+];
 const CREATE_KEY_SERVER_PERMISSIONS = [
   'control.read-console',
   'control.console',
@@ -18,7 +24,6 @@ const CREATE_KEY_SERVER_PERMISSIONS = [
   'files.read',
   'files.read-content',
   'files.update',
-  'files.write',
   'files.delete',
   'files.archive',
 ];

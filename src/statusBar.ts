@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { PowerAction, PowerState, ResourceUsage } from './api/types.ts';
 import { ConsoleSocket } from './console/websocket.ts';
+import { formatBytes } from './format.ts';
 import { decodeAuthority } from './fs/fileSystemProvider.ts';
 import { log } from './log.ts';
 import { shortId } from './servers.ts';
@@ -53,19 +54,6 @@ function stateIcon(state: PowerState | null): string {
     default:
       return '$(sync~spin)';
   }
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ['KiB', 'MiB', 'GiB', 'TiB'];
-  let value = bytes;
-  let unit = 'B';
-  for (const u of units) {
-    value /= 1024;
-    unit = u;
-    if (value < 1024) break;
-  }
-  return `${value.toFixed(1)} ${unit}`;
 }
 
 function formatUptime(ms: number): string {

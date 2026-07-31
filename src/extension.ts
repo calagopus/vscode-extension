@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import { CollabManager } from './collab/collabManager.ts';
-import { ConsolePseudoterminal, createConsoleTerminal } from './console/pseudoterminal.ts';
+import { ConsolePseudoterminal, createConsoleTerminal, trackConsoleTerminals } from './console/pseudoterminal.ts';
+import { registerFileActions } from './files/actions.ts';
+import { FileOperationTracker } from './files/operations.ts';
 import { CalagopusFileSystem } from './fs/fileSystemProvider.ts';
 import { log } from './log.ts';
 import { registerRevisionsView } from './revisions/revisionsView.ts';
@@ -15,6 +17,7 @@ import {
 } from './servers.ts';
 import { Session } from './session.ts';
 import { SettingsCache } from './settings.ts';
+import { registerSnippetsView } from './snippets/snippetsView.ts';
 import { ServerStatusBar } from './statusBar.ts';
 import {
   CalagopusUriHandler,
@@ -37,6 +40,9 @@ export function activate(context: vscode.ExtensionContext): void {
   const statusBar = new ServerStatusBar(session);
   const socketHub = new WingsSocketHub(session);
   const collab = new CollabManager(socketHub, session);
+  const fs = new CalagopusFileSystem(session, settings, collab);
+  const operations = new FileOperationTracker(socketHub, session, fs);
+  fs.setOperationTracker(operations);
 
   const openConsoleFor = (server: MountedServer): vscode.Terminal => {
     const { terminal } = createConsoleTerminal(socketHub, settings, server.origin, server.uuid, server.name);
@@ -57,20 +63,29 @@ export function activate(context: vscode.ExtensionContext): void {
     log,
     statusBar,
     collab,
+    operations,
     { dispose: () => socketHub.dispose() },
 
-    vscode.workspace.registerFileSystemProvider('calagopus', new CalagopusFileSystem(session, settings, collab), {
+    vscode.workspace.registerFileSystemProvider('calagopus', fs, {
       isCaseSensitive: true,
     }),
 
     vscode.window.registerUriHandler(new CalagopusUriHandler(session, context.globalState, openConsoleFor)),
 
     ...registerRevisionsView(session),
+    ...registerSnippetsView(session, openConsoleFor),
+    ...registerFileActions(session, operations, fs),
+    ...trackConsoleTerminals(),
   );
 
   const updateMountedContext = () =>
     vscode.commands.executeCommand('setContext', 'calagopus.workspaceMounted', workspaceServers().length > 0);
-  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(updateMountedContext));
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      updateMountedContext();
+      void operations.sync();
+    }),
+  );
   void updateMountedContext();
 
   try {

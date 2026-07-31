@@ -28,6 +28,11 @@ export interface DirectoryListResponse {
   entries: Pagination<DirectoryEntry>;
 }
 
+export interface Egg {
+  uuid: string;
+  name: string;
+}
+
 export interface Server {
   uuid: string;
   uuid_short: string;
@@ -38,6 +43,7 @@ export interface Server {
   is_owner: boolean;
   permissions: string[];
   node_name: string;
+  egg: Egg;
 }
 
 export interface ServerListResponse {
@@ -104,4 +110,48 @@ export interface FileSearchFilters {
     include_unmatched: boolean;
     case_insensitive: boolean;
   } | null;
+}
+
+export type ArchiveFormat =
+  | 'tar'
+  | 'tar_gz'
+  | 'tar_xz'
+  | 'tar_lzip'
+  | 'tar_bz2'
+  | 'tar_lz4'
+  | 'tar_zstd'
+  | 'zip'
+  | 'seven_zip';
+
+export interface ChmodFile {
+  file: string;
+  mode: string;
+  recursive: boolean;
+}
+
+export interface CommandSnippet {
+  uuid: string;
+  name: string;
+  eggs: string[];
+  command: string;
+  created: string;
+}
+
+export type FileOperationType =
+  | 'compress'
+  | 'decompress'
+  | 'pull'
+  | 'copy'
+  | 'copy_many'
+  | 'copy_remote'
+  | 'export_backup';
+
+export interface FileOperation {
+  type: FileOperationType;
+  path?: string;
+  destination_path?: string;
+  start_time: string;
+  bytes_processed: number;
+  bytes_total: number;
+  files_processed?: number;
 }

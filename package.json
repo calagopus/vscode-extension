@@ -3,7 +3,7 @@
   "icon": "icon.png",
   "displayName": "Calagopus",
   "description": "Browse and edit Calagopus server files and access the server console directly from VS Code.",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "publisher": "calagopus",
   "license": "MIT",
   "repository": {
@@ -97,6 +97,56 @@
         "title": "Restore Revision into Editor",
         "category": "Calagopus",
         "icon": "$(discard)"
+      },
+      {
+        "command": "calagopus.files.compress",
+        "title": "Compress to Archive...",
+        "category": "Calagopus"
+      },
+      {
+        "command": "calagopus.files.decompress",
+        "title": "Extract Archive Here",
+        "category": "Calagopus"
+      },
+      {
+        "command": "calagopus.files.permissions",
+        "title": "Change Permissions...",
+        "category": "Calagopus"
+      },
+      {
+        "command": "calagopus.snippets.refresh",
+        "title": "Refresh Command Snippets",
+        "category": "Calagopus",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "calagopus.snippets.run",
+        "title": "Run Command Snippet",
+        "category": "Calagopus",
+        "icon": "$(play)"
+      },
+      {
+        "command": "calagopus.snippets.create",
+        "title": "Create Command Snippet",
+        "category": "Calagopus",
+        "icon": "$(add)"
+      },
+      {
+        "command": "calagopus.snippets.edit",
+        "title": "Edit Command Snippet",
+        "category": "Calagopus",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "calagopus.snippets.delete",
+        "title": "Delete Command Snippet",
+        "category": "Calagopus",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "calagopus.snippets.quickRun",
+        "title": "Run Command Snippet...",
+        "category": "Calagopus"
       }
     ],
     "views": {
@@ -106,6 +156,12 @@
           "name": "File History",
           "icon": "$(history)",
           "when": "calagopus.workspaceMounted"
+        },
+        {
+          "id": "calagopusSnippets",
+          "name": "Command Snippets",
+          "icon": "$(terminal)",
+          "when": "calagopus.workspaceMounted"
         }
       ]
     },
@@ -113,6 +169,10 @@
       {
         "view": "calagopusRevisions",
         "contents": "Open a Calagopus server file to browse its revision history."
+      },
+      {
+        "view": "calagopusSnippets",
+        "contents": "No command snippets apply to the servers in this workspace.\n[Create Snippet](command:calagopus.snippets.create)"
       }
     ],
     "menus": {
@@ -121,6 +181,16 @@
           "command": "calagopus.revisions.refresh",
           "when": "view == calagopusRevisions",
           "group": "navigation"
+        },
+        {
+          "command": "calagopus.snippets.refresh",
+          "when": "view == calagopusSnippets",
+          "group": "navigation@2"
+        },
+        {
+          "command": "calagopus.snippets.create",
+          "when": "view == calagopusSnippets",
+          "group": "navigation@1"
         }
       ],
       "view/item/context": [
@@ -138,6 +208,21 @@
           "command": "calagopus.revisions.restore",
           "when": "view == calagopusRevisions && viewItem =~ /^calagopusRevision/",
           "group": "inline@3"
+        },
+        {
+          "command": "calagopus.snippets.run",
+          "when": "view == calagopusSnippets && viewItem == calagopusSnippet",
+          "group": "inline@1"
+        },
+        {
+          "command": "calagopus.snippets.edit",
+          "when": "view == calagopusSnippets && viewItem == calagopusSnippet",
+          "group": "inline@2"
+        },
+        {
+          "command": "calagopus.snippets.delete",
+          "when": "view == calagopusSnippets && viewItem == calagopusSnippet",
+          "group": "inline@3"
         }
       ],
       "commandPalette": [
@@ -152,6 +237,47 @@
         {
           "command": "calagopus.revisions.restore",
           "when": "false"
+        },
+        {
+          "command": "calagopus.files.compress",
+          "when": "false"
+        },
+        {
+          "command": "calagopus.files.decompress",
+          "when": "false"
+        },
+        {
+          "command": "calagopus.files.permissions",
+          "when": "false"
+        },
+        {
+          "command": "calagopus.snippets.run",
+          "when": "false"
+        },
+        {
+          "command": "calagopus.snippets.edit",
+          "when": "false"
+        },
+        {
+          "command": "calagopus.snippets.delete",
+          "when": "false"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "calagopus.files.compress",
+          "when": "resourceScheme == calagopus",
+          "group": "calagopus@1"
+        },
+        {
+          "command": "calagopus.files.decompress",
+          "when": "resourceScheme == calagopus && resourceFilename =~ /\\.(zip|7z|tar|itaf|tar\\.(gz|xz|bz2|lz4|zst|lz))$/",
+          "group": "calagopus@2"
+        },
+        {
+          "command": "calagopus.files.permissions",
+          "when": "resourceScheme == calagopus",
+          "group": "calagopus@3"
         }
       ]
     },
@@ -173,7 +299,15 @@
           "icon": "server-environment"
         }
       ]
-    }
+    },
+    "keybindings": [
+      {
+        "command": "calagopus.snippets.quickRun",
+        "key": "ctrl+alt+s",
+        "mac": "cmd+alt+s",
+        "when": "terminalFocus && calagopus.consoleFocused"
+      }
+    ]
   },
   "scripts": {
     "compile": "node esbuild.mjs",

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { PowerState } from '../api/types.ts';
 import { log } from '../log.ts';
+import type { MountedServer } from '../servers.ts';
 import type { SettingsCache } from '../settings.ts';
 import type { WingsSocketHub, WingsSocketLease } from '../wings/socketHub.ts';
 
@@ -37,6 +38,24 @@ export class ConsolePseudoterminal implements vscode.Pseudoterminal {
     private readonly server: string,
     private readonly serverName: string,
   ) {}
+
+  get target(): MountedServer {
+    return { origin: this.origin, uuid: this.server, name: this.serverName };
+  }
+
+  get lastCommand(): string | null {
+    return this.history.at(-1) ?? null;
+  }
+
+  runCommand(command: string): void {
+    const trimmed = command.trim();
+    if (trimmed.length === 0) {
+      return;
+    }
+    this.history.push(trimmed);
+    this.historyIndex = -1;
+    this.socket?.sendCommand(trimmed);
+  }
 
   open(): void {
     void this.settings.tryGet(this.origin).then((settings) => {
@@ -195,5 +214,64 @@ export function createConsoleTerminal(
     pty,
     iconPath: new vscode.ThemeIcon('server-environment'),
   });
+  consoles.set(terminal, { terminal, pty, server: pty.target });
   return { terminal, pty };
+}
+
+export interface ConsoleHandle {
+  terminal: vscode.Terminal;
+  pty: ConsolePseudoterminal;
+  server: MountedServer;
+}
+
+const consoles = new Map<vscode.Terminal, ConsoleHandle>();
+
+function bindConsoleTerminal(terminal: vscode.Terminal): void {
+  const { pty } = terminal.creationOptions as vscode.ExtensionTerminalOptions;
+  if (pty instanceof ConsolePseudoterminal) {
+    consoles.set(terminal, { terminal, pty, server: pty.target });
+  }
+}
+
+export function trackConsoleTerminals(): vscode.Disposable[] {
+  for (const terminal of vscode.window.terminals) {
+    bindConsoleTerminal(terminal);
+  }
+
+  const syncContext = () => {
+    const active = vscode.window.activeTerminal;
+    void vscode.commands.executeCommand(
+      'setContext',
+      'calagopus.consoleFocused',
+      active !== undefined && consoles.has(active),
+    );
+  };
+  syncContext();
+
+  return [
+    vscode.window.onDidOpenTerminal((terminal) => {
+      bindConsoleTerminal(terminal);
+      syncContext();
+    }),
+    vscode.window.onDidCloseTerminal((terminal) => {
+      consoles.delete(terminal);
+      syncContext();
+    }),
+    vscode.window.onDidChangeActiveTerminal(syncContext),
+    new vscode.Disposable(() => consoles.clear()),
+  ];
+}
+
+export function activeConsole(): ConsoleHandle | null {
+  const active = vscode.window.activeTerminal;
+  return active ? (consoles.get(active) ?? null) : null;
+}
+
+export function consoleFor(server: MountedServer): ConsoleHandle | null {
+  for (const handle of consoles.values()) {
+    if (handle.server.origin === server.origin && handle.server.uuid === server.uuid) {
+      return handle;
+    }
+  }
+  return null;
 }

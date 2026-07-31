@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { decodeAuthority, refOf } from '../fs/fileSystemProvider.ts';
 import { log } from '../log.ts';
+import { basename } from '../paths.ts';
 import type { Session } from '../session.ts';
 import type { WingsSocketHub } from '../wings/socketHub.ts';
 import { CollabConflictError, type CollabParticipant, CollabSession } from './session.ts';
@@ -11,10 +12,6 @@ const DISK_SCHEME = 'calagopus-collab-disk';
 const VIEW_DIFF = 'View Diff';
 const LOAD_DISK = 'Load Disk Version';
 const KEEP_EDITOR = 'Keep Editor Version';
-
-function basename(path: string): string {
-  return path.slice(path.lastIndexOf('/') + 1);
-}
 
 export interface CollabRegistry {
   hasSession(uri: vscode.Uri): boolean;

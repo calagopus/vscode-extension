@@ -1,5 +1,8 @@
 import type {
   Account,
+  ArchiveFormat,
+  ChmodFile,
+  CommandSnippet,
   CopyFile,
   DirectoryEntry,
   DirectoryListResponse,
@@ -180,8 +183,9 @@ export class PanelClient {
     return revisions;
   }
 
-  async getFileRevisionContent(server: string, revision: number): Promise<Uint8Array> {
-    const response = await this.request(`/api/client/servers/${server}/files/revisions/${revision}`);
+  async getFileRevisionContent(server: string, revision: number, file: string): Promise<Uint8Array> {
+    const params = new URLSearchParams({ file });
+    const response = await this.request(`/api/client/servers/${server}/files/revisions/${revision}?${params}`);
     return new Uint8Array(await response.arrayBuffer());
   }
 
@@ -285,14 +289,6 @@ export class PanelClient {
     return parseUploadOffset(response.headers.get('Upload-Offset')) ?? 0;
   }
 
-  async copy(server: string, path: string, name: string, overwrite = false): Promise<void> {
-    await this.request(`/api/client/servers/${server}/files/copy`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path, destination: name, overwrite, foreground: true }),
-    });
-  }
-
   async copyRemote(
     server: string,
     root: string,
@@ -346,6 +342,53 @@ export class PanelClient {
     return body.entries;
   }
 
+  async compress(server: string, root: string, files: string[], format: ArchiveFormat, name?: string): Promise<string> {
+    const { identifier } = await this.json<{ identifier: string }>(`/api/client/servers/${server}/files/compress`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ root, files, format, name, foreground: false }),
+    });
+    return identifier;
+  }
+
+  async decompress(server: string, root: string, file: string): Promise<string> {
+    const { identifier } = await this.json<{ identifier: string }>(`/api/client/servers/${server}/files/decompress`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ root, file, foreground: false }),
+    });
+    return identifier;
+  }
+
+  async chmod(server: string, root: string, files: ChmodFile[]): Promise<number> {
+    const { updated } = await this.json<{ updated: number }>(`/api/client/servers/${server}/files/chmod`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ root, files }),
+    });
+    return updated;
+  }
+
+  async copyMany(
+    server: string,
+    root: string,
+    files: CopyFile[],
+    overwrite: boolean,
+  ): Promise<{ identifier: string; skipped: DirectoryEntry[] }> {
+    return this.json<{ identifier: string; skipped: DirectoryEntry[] }>(
+      `/api/client/servers/${server}/files/copy-many`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root, files, overwrite, foreground: false }),
+      },
+    );
+  }
+
+  async cancelFileOperation(server: string, operation: string): Promise<void> {
+    await this.request(`/api/client/servers/${server}/files/operations/${operation}`, { method: 'DELETE' });
+  }
+
   async getWebsocketCredentials(server: string): Promise<WebsocketCredentials> {
     return this.json<WebsocketCredentials>(`/api/client/servers/${server}/websocket`);
   }
@@ -356,5 +399,36 @@ export class PanelClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action }),
     });
+  }
+
+  async listCommandSnippets(): Promise<CommandSnippet[]> {
+    return this.fetchAll(
+      (page) => `/api/client/account/command-snippets?page=${page}&per_page=100`,
+      (body: { command_snippets: Pagination<CommandSnippet> }) => body.command_snippets,
+    );
+  }
+
+  async createCommandSnippet(name: string, command: string, eggs: string[]): Promise<CommandSnippet> {
+    const { command_snippet } = await this.json<{ command_snippet: CommandSnippet }>(
+      '/api/client/account/command-snippets',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, command, eggs }),
+      },
+    );
+    return command_snippet;
+  }
+
+  async updateCommandSnippet(uuid: string, name: string, command: string, eggs: string[]): Promise<void> {
+    await this.request(`/api/client/account/command-snippets/${uuid}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, command, eggs }),
+    });
+  }
+
+  async deleteCommandSnippet(uuid: string): Promise<void> {
+    await this.request(`/api/client/account/command-snippets/${uuid}`, { method: 'DELETE' });
   }
 }
