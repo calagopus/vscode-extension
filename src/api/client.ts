@@ -75,6 +75,10 @@ export class PanelClient {
     this.apiKey = apiKey;
   }
 
+  get keyStart(): string {
+    return this.apiKey.slice(0, 16);
+  }
+
   private async request(path: string, init: RequestInit = {}, allowReauth = true): Promise<Response> {
     const response = await fetch(`${this.origin}${path}`, {
       ...init,

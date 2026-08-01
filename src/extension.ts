@@ -143,6 +143,30 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     }),
 
+    vscode.commands.registerCommand('calagopus.updatePermissions', async () => {
+      const origins = await session.origins();
+      if (origins.length === 0) {
+        vscode.window.showInformationMessage('Calagopus: not signed in.');
+        return;
+      }
+
+      const picked =
+        origins.length === 1
+          ? origins[0]
+          : await vscode.window.showQuickPick(origins, {
+              title: 'Calagopus: update the API key of which panel?',
+            });
+      if (!picked) {
+        return;
+      }
+
+      if (await session.updateApiKeyPermissions(picked)) {
+        vscode.window.showInformationMessage(`Calagopus: API key permissions updated for ${picked}.`);
+      } else {
+        vscode.window.showWarningMessage(`Calagopus: the API key permissions for ${picked} were not updated.`);
+      }
+    }),
+
     vscode.commands.registerCommand('calagopus.openServer', async () => {
       const picked = await pickServer(session);
       if (picked) {

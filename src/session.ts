@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { ApiError, PanelClient } from './api/client.ts';
-import { provisionApiKey } from './auth.ts';
+import { provisionApiKey, requestApiKeyPermissions } from './auth.ts';
 import { log } from './log.ts';
 
 const ORIGINS_KEY = 'calagopus.origins';
@@ -109,6 +109,17 @@ export class Session {
       return null;
     }
     return this.signInWithKey(normalized, key);
+  }
+
+  async updateApiKeyPermissions(origin: string): Promise<boolean> {
+    const normalized = new URL(origin).origin;
+    const client = await this.tryClient(normalized);
+    if (!client) {
+      log.info(`session: no stored API key for ${normalized} to update`);
+      return false;
+    }
+
+    return requestApiKeyPermissions(normalized, client.keyStart);
   }
 
   async ephemeralClient(origin: string, apiKey: string): Promise<PanelClient | null> {
