@@ -59,14 +59,7 @@ export class CollabSession {
   private dirty = false;
   private localEdits = false;
   private conflictState: CollabConflict | null = null;
-  // The server keys sessions by the symlink-resolved canonical path and stamps every
-  // broadcast event with it, which can differ from the path this session subscribed
-  // with. The sync ack echoes the subscribed path as a trailing arg so the canonical
-  // key can be adopted for event matching.
   private sessionKey: string | null = null;
-  // Updates arriving before the sync snapshot (subscribe race) or between a resync
-  // teardown and the next snapshot would otherwise be dropped, leaving the doc waiting
-  // forever on a missing dependency. Buffered and replayed; yjs ignores duplicates.
   private pendingUpdates: [string, string][] = [];
   private readonly pendingSaves = new Set<{
     resolve: () => void;

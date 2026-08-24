@@ -13,6 +13,7 @@ Browse and edit [Calagopus](https://calagopus.com) server files and access the s
 - Collaborate on server files in real time - edits and cursors are shared live and saves are coordinated when multiple people open the same file.
 - Browse a file's revision history in the explorer, diff any revision against the current file or the previous one, and restore old versions.
 - View server state in the status bar and trigger power actions (start, stop, restart, kill).
+- Follow long-running server work as progress notifications - file operations (compress, extract, copy, pull) as well as backup creation, restoration, and deletion, including the ones started from the panel.
 - Open servers and consoles via deep links using the `calagopus` URI handler.
 - Secure, persistent sign-in backed by VS Code's secret storage.
 

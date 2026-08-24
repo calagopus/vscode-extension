@@ -155,3 +155,23 @@ export interface FileOperation {
   bytes_total: number;
   files_processed?: number;
 }
+
+export interface BackupProgress {
+  bytes_processed: number;
+  bytes_total: number;
+  files_processed: number;
+}
+
+export interface BackupCompleted {
+  successful: boolean;
+  checksum_type: string;
+  checksum: string;
+  size: number;
+  files: number;
+  browsable: boolean;
+  streaming: boolean;
+}
+
+export interface BackupDeleted {
+  successful: boolean;
+}

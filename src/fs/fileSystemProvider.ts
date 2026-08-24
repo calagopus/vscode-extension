@@ -140,6 +140,27 @@ export class CalagopusFileSystem implements vscode.FileSystemProvider {
     ]);
   }
 
+  invalidateServer(ref: ServerRef): void {
+    const prefix = `${ref.origin}\0${ref.server}\0`;
+    const changes: vscode.FileChangeEvent[] = [];
+    for (const key of [...this.cache.keys()]) {
+      if (!key.startsWith(prefix)) {
+        continue;
+      }
+      this.cache.delete(key);
+      changes.push({
+        type: vscode.FileChangeType.Changed,
+        uri: serverUri(ref.origin, ref.server, key.slice(prefix.length)),
+      });
+    }
+
+    const root = serverUri(ref.origin, ref.server, '/');
+    if (!changes.some((change) => change.uri.toString() === root.toString())) {
+      changes.push({ type: vscode.FileChangeType.Changed, uri: root });
+    }
+    this.didChangeEmitter.fire(changes);
+  }
+
   async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
     if (uri.path === '/' || uri.path === '') {
       return { type: vscode.FileType.Directory, ctime: 0, mtime: 0, size: 0 };

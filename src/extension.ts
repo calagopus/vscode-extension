@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { BackupProgressTracker } from './backups/progress.ts';
 import { CollabManager } from './collab/collabManager.ts';
 import { ConsolePseudoterminal, createConsoleTerminal, trackConsoleTerminals } from './console/pseudoterminal.ts';
 import { registerFileActions } from './files/actions.ts';
@@ -43,6 +44,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const fs = new CalagopusFileSystem(session, settings, collab);
   const operations = new FileOperationTracker(socketHub, session, fs);
   fs.setOperationTracker(operations);
+  const backups = new BackupProgressTracker(socketHub, session, fs);
 
   const openConsoleFor = (server: MountedServer): vscode.Terminal => {
     const { terminal } = createConsoleTerminal(socketHub, settings, server.origin, server.uuid, server.name);
@@ -64,6 +66,7 @@ export function activate(context: vscode.ExtensionContext): void {
     statusBar,
     collab,
     operations,
+    backups,
     { dispose: () => socketHub.dispose() },
 
     vscode.workspace.registerFileSystemProvider('calagopus', fs, {
@@ -84,6 +87,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       updateMountedContext();
       void operations.sync();
+      void backups.sync();
     }),
   );
   void updateMountedContext();

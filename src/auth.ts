@@ -27,6 +27,7 @@ const CREATE_KEY_SERVER_PERMISSIONS = [
   'files.update',
   'files.delete',
   'files.archive',
+  'backups.read',
 ];
 
 function callbackPage(message: string, autoClose = false): string {
