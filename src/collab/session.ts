@@ -59,6 +59,15 @@ export class CollabSession {
   private dirty = false;
   private localEdits = false;
   private conflictState: CollabConflict | null = null;
+  // The server keys sessions by the symlink-resolved canonical path and stamps every
+  // broadcast event with it, which can differ from the path this session subscribed
+  // with. The sync ack echoes the subscribed path as a trailing arg so the canonical
+  // key can be adopted for event matching.
+  private sessionKey: string | null = null;
+  // Updates arriving before the sync snapshot (subscribe race) or between a resync
+  // teardown and the next snapshot would otherwise be dropped, leaving the doc waiting
+  // forever on a missing dependency. Buffered and replayed; yjs ignores duplicates.
+  private pendingUpdates: [string, string][] = [];
   private readonly pendingSaves = new Set<{
     resolve: () => void;
     reject: (err: Error) => void;
@@ -144,6 +153,7 @@ export class CollabSession {
       pending.reject(new Error('collaboration session closed'));
     }
     this.pendingSaves.clear();
+    this.pendingUpdates = [];
     this.destroyDoc();
     if (this.subscribed) {
       this.lease.send('file collab unsubscribe', [this.path, this.editorId]);
@@ -185,11 +195,13 @@ export class CollabSession {
   }
 
   private matches(path: string): boolean {
-    return normalizePath(path) === normalizePath(this.path);
+    const normalized = normalizePath(path);
+    return normalized === normalizePath(this.path) || normalized === this.sessionKey;
   }
 
-  private onSync = (syncPath: string, state: string, meta?: string): void => {
-    if (this.disposed || !this.matches(syncPath)) {
+  private onSync = (syncPath: string, state: string, meta?: string, rawPath?: string): void => {
+    const rawMatches = rawPath !== undefined && normalizePath(rawPath) === normalizePath(this.path);
+    if (this.disposed || (!rawMatches && !this.matches(syncPath))) {
       return;
     }
 
@@ -213,6 +225,7 @@ export class CollabSession {
     this.pendingSaves.clear();
 
     this.destroyDoc();
+    this.sessionKey = normalizePath(syncPath);
 
     const doc = new Y.Doc();
     Y.applyUpdate(doc, fromBase64(state), 'remote');
@@ -241,6 +254,13 @@ export class CollabSession {
     this.binding = binding;
     this.cursors = new CursorDecorations(doc, awareness, this.document);
 
+    for (const [updatePath, update] of this.pendingUpdates) {
+      if (this.matches(updatePath)) {
+        Y.applyUpdate(doc, fromBase64(update), 'remote');
+      }
+    }
+    this.pendingUpdates = [];
+
     this.lease.send('file collab awareness', [this.path, toBase64(encodeAwarenessUpdate(awareness, [doc.clientID]))]);
 
     this.callbacks.onActiveChange();
@@ -248,7 +268,16 @@ export class CollabSession {
   };
 
   private onUpdate = (updatePath: string, update: string): void => {
-    if (this.disposed || !this.matches(updatePath) || !this.doc) {
+    if (this.disposed) {
+      return;
+    }
+    if (!this.doc) {
+      if (this.pendingUpdates.length < 64) {
+        this.pendingUpdates.push([updatePath, update]);
+      }
+      return;
+    }
+    if (!this.matches(updatePath)) {
       return;
     }
     Y.applyUpdate(this.doc, fromBase64(update), 'remote');
@@ -324,6 +353,7 @@ export class CollabSession {
     }
 
     const wasActive = this.doc !== null;
+    this.pendingUpdates = [];
     this.destroyDoc();
     this.setDirty(false);
     this.setConflict(null);
