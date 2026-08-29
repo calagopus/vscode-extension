@@ -9,9 +9,16 @@ export class ConsoleSocket extends EventEmitter {
   private closed = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectAttempts = 0;
+  private refreshingToken = false;
+  private tokenRefreshAttempts = 0;
+  private tokenRefreshTimer: NodeJS.Timeout | null = null;
+  private lastTokenRefreshAt = 0;
+  private authGapped = false;
 
   private readonly minBackoffMs = 1_000;
   private readonly maxBackoffMs = 20_000;
+  private readonly maxTokenRefreshAttempts = 3;
+  private readonly tokenRefreshCooldownMs = 5_000;
 
   constructor(
     private readonly session: Session,
@@ -32,11 +39,18 @@ export class ConsoleSocket extends EventEmitter {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.tokenRefreshTimer) {
+      clearTimeout(this.tokenRefreshTimer);
+      this.tokenRefreshTimer = null;
+    }
     this.socket?.close(1000, 'client closing');
     this.socket = null;
   }
 
   send(event: string, args: string[] = []): void {
+    if (this.authGapped && event !== 'auth') {
+      return;
+    }
     if (this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify({ event, args }));
     }
@@ -67,6 +81,8 @@ export class ConsoleSocket extends EventEmitter {
     socket.on('open', () => {
       log.debug(`ws [${this.server}] connected`);
       this.reconnectAttempts = 0;
+      this.tokenRefreshAttempts = 0;
+      this.authGapped = false;
       this.emit('CONNECTION_STATE', 'connected');
       socket.send(JSON.stringify({ event: 'auth', args: [credentials.token] }));
     });
@@ -85,12 +101,27 @@ export class ConsoleSocket extends EventEmitter {
       }
 
       switch (event) {
+        case 'auth success':
+          this.tokenRefreshAttempts = 0;
+          this.authGapped = false;
+          break;
         case 'token expiring':
+          void this.refreshToken();
+          break;
         case 'token expired':
+          this.authGapped = true;
+          this.emit('AUTH_GAP');
           void this.refreshToken();
           break;
         case 'jwt error':
-          this.emit('CONNECTION_ERROR', new Error(`JWT error from daemon: ${args?.[0]}`));
+          if (!(args?.[0] ?? '').toLowerCase().includes('token')) {
+            this.emit('CONNECTION_ERROR', new Error(`Error from daemon: ${args?.[0]}`));
+            break;
+          }
+
+          this.authGapped = true;
+          this.emit('AUTH_GAP');
+          void this.refreshToken();
           break;
       }
 
@@ -122,13 +153,50 @@ export class ConsoleSocket extends EventEmitter {
   }
 
   private async refreshToken(): Promise<void> {
+    if (this.closed || this.refreshingToken || this.tokenRefreshTimer) {
+      return;
+    }
+
+    const sinceLast = Date.now() - this.lastTokenRefreshAt;
+    if (sinceLast < this.tokenRefreshCooldownMs) {
+      this.scheduleTokenRefresh(this.tokenRefreshCooldownMs - sinceLast);
+      return;
+    }
+
+    this.tokenRefreshAttempts++;
+    if (this.tokenRefreshAttempts > this.maxTokenRefreshAttempts) {
+      this.emit('CONNECTION_ERROR', new Error('Unable to reauthenticate with the daemon, reconnecting.'));
+      this.socket?.close(1000, 'token refresh failed');
+      return;
+    }
+
+    this.refreshingToken = true;
+    this.lastTokenRefreshAt = Date.now();
     try {
       const client = await this.session.client(this.origin);
       const credentials = await client.getWebsocketCredentials(this.server);
       this.send('auth', [credentials.token]);
     } catch (err) {
-      this.emit('CONNECTION_ERROR', err instanceof Error ? err : new Error(String(err)));
+      const error = err instanceof Error ? err : new Error(String(err));
+      log.debug(
+        `ws [${this.server}] token refresh failed (${this.tokenRefreshAttempts}/${this.maxTokenRefreshAttempts}): ${error.message}`,
+      );
+
+      this.scheduleTokenRefresh(Math.min(this.minBackoffMs * 2 ** (this.tokenRefreshAttempts - 1), this.maxBackoffMs));
+    } finally {
+      this.refreshingToken = false;
     }
+  }
+
+  private scheduleTokenRefresh(delay: number): void {
+    if (this.closed || this.tokenRefreshTimer) {
+      return;
+    }
+
+    this.tokenRefreshTimer = setTimeout(() => {
+      this.tokenRefreshTimer = null;
+      void this.refreshToken();
+    }, delay);
   }
 
   private scheduleReconnect(): void {

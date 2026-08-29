@@ -60,6 +60,7 @@ export class CollabSession {
   private localEdits = false;
   private conflictState: CollabConflict | null = null;
   private sessionKey: string | null = null;
+  private syncedEpoch: string | null = null;
   private pendingUpdates: [string, string][] = [];
   private readonly pendingSaves = new Set<{
     resolve: () => void;
@@ -90,6 +91,9 @@ export class CollabSession {
       if (state !== 'connected') {
         this.subscribedThisConnection = false;
       }
+    });
+    this.lease.on('AUTH_GAP', () => {
+      this.subscribedThisConnection = false;
     });
     this.lease.whenAuthenticated(() => {
       if (this.subscribedThisConnection) {
@@ -192,7 +196,7 @@ export class CollabSession {
     return normalized === normalizePath(this.path) || normalized === this.sessionKey;
   }
 
-  private onSync = (syncPath: string, state: string, meta?: string, rawPath?: string): void => {
+  private onSync = (syncPath: string, state: string, meta?: string, rawPath?: string, stateVector?: string): void => {
     const rawMatches = rawPath !== undefined && normalizePath(rawPath) === normalizePath(this.path);
     if (this.disposed || (!rawMatches && !this.matches(syncPath))) {
       return;
@@ -200,13 +204,31 @@ export class CollabSession {
 
     let dirty = false;
     let conflict: CollabConflict | null = null;
+    let epoch: string | null = null;
     try {
       const parsed = JSON.parse(meta ?? '{}');
       dirty = Boolean(parsed.dirty);
       conflict = parsed.conflict ?? null;
+      epoch = typeof parsed.epoch === 'string' ? parsed.epoch : null;
     } catch {
       // ignore
     }
+
+    const existing = this.doc;
+    if (existing && stateVector && epoch !== null && epoch === this.syncedEpoch) {
+      this.sessionKey = normalizePath(syncPath);
+      Y.applyUpdate(existing, fromBase64(state), 'remote');
+
+      this.sendUpdate(Y.encodeStateAsUpdate(existing, fromBase64(stateVector)));
+      this.setConflict(conflict);
+
+      if (this.pendingSaves.size > 0) {
+        this.lease.send('file collab save', [this.path]);
+      }
+
+      return;
+    }
+
     this.setDirty(dirty);
     this.setConflict(conflict);
     this.localEdits = false;
@@ -219,6 +241,7 @@ export class CollabSession {
 
     this.destroyDoc();
     this.sessionKey = normalizePath(syncPath);
+    this.syncedEpoch = epoch;
 
     const doc = new Y.Doc();
     Y.applyUpdate(doc, fromBase64(state), 'remote');
@@ -347,6 +370,12 @@ export class CollabSession {
 
     const wasActive = this.doc !== null;
     this.pendingUpdates = [];
+
+    if (message === 'resync') {
+      this.lease.send('file collab subscribe', [this.path, this.editorId]);
+      return;
+    }
+
     this.destroyDoc();
     this.setDirty(false);
     this.setConflict(null);
@@ -357,15 +386,12 @@ export class CollabSession {
     }
     this.pendingSaves.clear();
 
-    if (message === 'resync' || wasActive) {
+    if (wasActive) {
       this.lease.send('file collab subscribe', [this.path, this.editorId]);
-      if (message !== 'resync') {
-        this.callbacks.onError(message);
-      }
     } else {
       this.subscribed = false;
-      this.callbacks.onError(message);
     }
+    this.callbacks.onError(message);
     this.callbacks.onActiveChange();
   };
 

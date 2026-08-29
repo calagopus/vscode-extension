@@ -23,6 +23,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Check whether this version was already released
         id: check
@@ -30,12 +31,12 @@ jobs:
           VERSION="$(jq -r '.version' package.json)"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-          if git rev-parse --verify --quiet "refs/tags/v$VERSION" >/dev/null; then
+          if git rev-parse --verify --quiet "refs/tags/$VERSION" >/dev/null; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::v$VERSION already released; skipping publish."
+            echo "::notice::$VERSION already released; skipping publish."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::New version v$VERSION detected; will publish."
+            echo "::notice::New version $VERSION detected; will publish."
           fi
 
   dist:
