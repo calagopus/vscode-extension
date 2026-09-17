@@ -316,6 +316,7 @@
   },
   "scripts": {
     "compile": "node esbuild.mjs",
+    "preview:auth": "node scripts/preview-auth-page.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
     "vscode:prepublish": "pnpm typecheck && pnpm compile -- --production",

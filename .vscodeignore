@@ -1,6 +1,7 @@
 src/**
 node_modules/**
 esbuild.mjs
+scripts/**
 tsconfig.json
 *.map
 .gitignore

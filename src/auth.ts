@@ -1,6 +1,8 @@
+import * as crypto from 'node:crypto';
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import * as vscode from 'vscode';
+import { callbackPage } from './authPage.ts';
 import { log } from './log.ts';
 
 const CREATE_KEY_PATH = '/account/api-keys/create';
@@ -30,15 +32,6 @@ const CREATE_KEY_SERVER_PERMISSIONS = [
   'backups.read',
 ];
 
-function callbackPage(message: string, autoClose = false): string {
-  const script = autoClose ? '<script>setTimeout(() => window.close(), 3000);</script>' : '';
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Calagopus</title></head><body style="font-family: system-ui, sans-serif; text-align: center; padding: 4rem;"><h2>Calagopus</h2><p>${message}</p>${script}</body></html>`;
-}
-
-const CALLBACK_OK_PAGE = callbackPage('Signed in. This tab will close automatically.', true);
-const CALLBACK_BAD_PAGE = callbackPage('No API key was provided. Please return to your editor and try again.');
-const CALLBACK_UPDATED_PAGE = callbackPage('Permissions updated. This tab will close automatically.', true);
-
 function applyPermissionParams(target: URL): void {
   target.searchParams.set('admin_permissions', CREATE_KEY_ADMIN_PERMISSIONS.join(','));
   target.searchParams.set('user_permissions', CREATE_KEY_USER_PERMISSIONS.join(','));
@@ -46,7 +39,16 @@ function applyPermissionParams(target: URL): void {
 }
 
 export async function provisionApiKey(origin: string): Promise<string | null> {
-  const callback = await startCallbackServer({ requireKey: true, okPage: CALLBACK_OK_PAGE });
+  const callback = await startCallbackServer({
+    requireKey: true,
+    okPage: callbackPage({
+      tone: 'success',
+      heading: 'Signed in',
+      message: 'Your new API key was handed back to your editor.',
+      autoClose: true,
+    }),
+  });
+
   try {
     const external = await vscode.env.asExternalUri(vscode.Uri.parse(callback.url));
 
@@ -65,7 +67,16 @@ export async function provisionApiKey(origin: string): Promise<string | null> {
 }
 
 export async function requestApiKeyPermissions(origin: string, keyStart: string): Promise<boolean> {
-  const callback = await startCallbackServer({ requireKey: false, okPage: CALLBACK_UPDATED_PAGE });
+  const callback = await startCallbackServer({
+    requireKey: false,
+    okPage: callbackPage({
+      tone: 'success',
+      heading: 'Permissions updated',
+      message: `The permissions of ${keyStart} were updated for your editor.`,
+      autoClose: true,
+    }),
+  });
+
   try {
     const external = await vscode.env.asExternalUri(vscode.Uri.parse(callback.url));
 
@@ -144,11 +155,27 @@ function startCallbackServer(options: {
       deliver = res;
     });
 
+    const state = crypto.randomUUID();
     const server = http.createServer((req, res) => {
-      const received = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('key');
+      const requested = new URL(req.url ?? '/', 'http://127.0.0.1');
+      if (requested.pathname !== '/' || requested.searchParams.get('state') !== state) {
+        res.writeHead(404).end();
+        return;
+      }
+
+      const received = requested.searchParams.get('key');
       const ok = options.requireKey ? !!received : true;
       res.writeHead(ok ? 200 : 400, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(ok ? options.okPage : CALLBACK_BAD_PAGE);
+      res.end(
+        ok
+          ? options.okPage
+          : callbackPage({
+              tone: 'error',
+              heading: 'No API key received',
+              message: 'The panel did not hand back a key. Return to your editor and try again.',
+            }),
+      );
+
       if (ok) {
         deliver(received ?? '');
       }
@@ -158,7 +185,7 @@ function startCallbackServer(options: {
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address() as AddressInfo;
       resolve({
-        url: `http://127.0.0.1:${port}/`,
+        url: `http://127.0.0.1:${port}/?state=${state}`,
         result,
         dispose: () => {
           deliver(null);
