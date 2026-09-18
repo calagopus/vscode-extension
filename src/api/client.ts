@@ -49,7 +49,41 @@ export interface Credentials {
 export type ReauthHandler = (client: PanelClient) => Promise<boolean>;
 
 export const UPLOAD_CHUNK_BYTES = 95 * 1024 * 1024;
+const UPLOAD_SLICE_BYTES = 1024 * 1024;
 const UPLOAD_RECOVERY_LIMIT = 3;
+const UPLOAD_PART_SUFFIX = '.upload-part';
+
+export interface UploadOptions {
+  onProgress?: (sent: number, total: number) => void;
+  signal?: AbortSignal;
+}
+
+function uploadStream(
+  content: Uint8Array,
+  from: number,
+  to: number,
+  report: (sent: number) => void,
+): ReadableStream<Uint8Array> {
+  let at = from;
+
+  return new ReadableStream({
+    pull(controller) {
+      if (at >= to) {
+        controller.close();
+        return;
+      }
+
+      const end = Math.min(at + UPLOAD_SLICE_BYTES, to);
+      controller.enqueue(content.subarray(at, end));
+      at = end;
+      report(at);
+    },
+  });
+}
+
+function isStagingUpload(entry: DirectoryEntry): boolean {
+  return entry.file && entry.name.length > UPLOAD_PART_SUFFIX.length && entry.name.endsWith(UPLOAD_PART_SUFFIX);
+}
 
 function parseUploadOffset(value: string | null): number | null {
   if (value === null) {
@@ -146,13 +180,14 @@ export class PanelClient {
   }
 
   async listDirectory(server: string, directory: string): Promise<DirectoryEntry[]> {
-    return this.fetchAll(
+    const entries = await this.fetchAll(
       (page) => {
         const params = new URLSearchParams({ directory, page: `${page}`, per_page: '100', sort: 'name_asc' });
         return `/api/client/servers/${server}/files/list?${params}`;
       },
       (body: DirectoryListResponse) => body.entries,
     );
+    return entries.filter((entry) => !isStagingUpload(entry));
   }
 
   async readFile(server: string, file: string): Promise<Uint8Array> {
@@ -207,63 +242,69 @@ export class PanelClient {
     return `${url}&directory=${encodeURIComponent(directory)}`;
   }
 
-  async uploadFile(server: string, directory: string, name: string, content: Uint8Array): Promise<void> {
+  async uploadFile(
+    server: string,
+    directory: string,
+    name: string,
+    content: Uint8Array,
+    options: UploadOptions = {},
+  ): Promise<void> {
     const total = content.byteLength;
-
-    if (total <= UPLOAD_CHUNK_BYTES) {
-      const url = `${await this.getUploadUrl(server, directory)}&total_size=${total}`;
-      await this.postUpload(url, name, content);
-      return;
-    }
-
-    await this.resumableUpload(server, directory, name, content);
-  }
-
-  private async postUpload(url: string, name: string, content: Uint8Array): Promise<void> {
-    const form = new FormData();
-    form.append('files', new Blob([content]), name);
-
-    const response = await fetch(url, { method: 'POST', body: form, headers: { Accept: 'application/json' } });
-    if (!response.ok) {
-      throw await apiError(response);
-    }
-  }
-
-  private async resumableUpload(server: string, directory: string, name: string, content: Uint8Array): Promise<void> {
-    const total = content.byteLength;
-    const path = directory === '/' ? `/${name}` : `${directory}/${name}`;
     const refreshUrl = async () => `${await this.getUploadUrl(server, directory)}&file=${encodeURIComponent(name)}`;
 
     let url = await refreshUrl();
 
     if ((await this.headUploadOffset(url)) !== 0) {
-      await this.delete(server, [path]);
-      url = await refreshUrl();
+      await this.discardUpload(url);
     }
 
     let offset = 0;
     let recoveries = 0;
+    let streaming = true;
+
     while (offset < total) {
       const sliceStart = offset;
       const end = Math.min(sliceStart + UPLOAD_CHUNK_BYTES, total);
       const isLast = end >= total;
 
-      const response = await fetch(url, {
-        method: 'PATCH',
-        body: content.subarray(sliceStart, end),
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/offset+octet-stream',
-          'Upload-Offset': String(sliceStart),
-          'Upload-Length': String(total),
-          ...(isLast ? { 'Upload-Complete': '?1' } : {}),
-        },
-      });
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: 'PATCH',
+          body: streaming
+            ? uploadStream(content, sliceStart, end, (sent) => options.onProgress?.(sent, total))
+            : content.subarray(sliceStart, end),
+          duplex: streaming ? 'half' : undefined,
+          signal: options.signal,
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/offset+octet-stream',
+            'Content-Length': String(end - sliceStart),
+            'Upload-Offset': String(sliceStart),
+            'Upload-Length': String(total),
+            ...(isLast ? { 'Upload-Complete': '?1' } : {}),
+          },
+        });
+      } catch (err) {
+        if (streaming && !options.signal?.aborted) {
+          streaming = false;
+          continue;
+        }
+
+        await this.discardUpload(url).catch(() => undefined);
+        throw err;
+      }
 
       if (response.ok) {
         offset = parseUploadOffset(response.headers.get('Upload-Offset')) ?? end;
+        options.onProgress?.(offset, total);
         recoveries = 0;
         continue;
+      }
+
+      if (response.status === 405 && sliceStart === 0) {
+        await this.uploadWholeFile(server, directory, name, content, options);
+        return;
       }
 
       if (response.status === 401 && recoveries < UPLOAD_RECOVERY_LIMIT) {
@@ -273,14 +314,50 @@ export class PanelClient {
       }
 
       if (response.status === 409 && recoveries < UPLOAD_RECOVERY_LIMIT) {
-        const resumed = parseUploadOffset(response.headers.get('Upload-Offset'));
-        if (resumed !== null && resumed <= total) {
-          recoveries++;
-          offset = resumed;
-          continue;
-        }
+        recoveries++;
+        await this.discardUpload(url);
+        offset = 0;
+        continue;
       }
 
+      throw await apiError(response);
+    }
+  }
+
+  private async uploadWholeFile(
+    server: string,
+    directory: string,
+    name: string,
+    content: Uint8Array,
+    options: UploadOptions,
+  ): Promise<void> {
+    const total = content.byteLength;
+    const base = await this.getUploadUrl(server, directory);
+
+    const form = new FormData();
+    form.append('files', new Blob([content]), name);
+
+    try {
+      const response = await fetch(`${base}&total_size=${total}`, {
+        method: 'POST',
+        body: form,
+        signal: options.signal,
+        headers: { Accept: 'application/json' },
+      });
+      if (!response.ok) {
+        throw await apiError(response);
+      }
+    } catch (err) {
+      await this.discardUpload(`${base}&file=${encodeURIComponent(name)}`).catch(() => undefined);
+      throw err;
+    }
+
+    options.onProgress?.(total, total);
+  }
+
+  private async discardUpload(url: string): Promise<void> {
+    const response = await fetch(url, { method: 'DELETE', headers: { Accept: 'application/json' } });
+    if (!response.ok) {
       throw await apiError(response);
     }
   }
@@ -343,7 +420,7 @@ export class PanelClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(filters),
     });
-    return body.entries;
+    return body.entries.filter((entry) => !isStagingUpload(entry));
   }
 
   async compress(server: string, root: string, files: string[], format: ArchiveFormat, name?: string): Promise<string> {

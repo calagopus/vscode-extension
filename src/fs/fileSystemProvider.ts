@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
-import { ApiError, type PanelClient } from '../api/client.ts';
+import { ApiError, type PanelClient, type UploadOptions } from '../api/client.ts';
 import type { DirectoryEntry } from '../api/types.ts';
 import type { CollabRegistry } from '../collab/collabManager.ts';
 import { CollabConflictError } from '../collab/session.ts';
 import type { FileOperationTracker } from '../files/operations.ts';
+import { formatBytes } from '../format.ts';
 import { log } from '../log.ts';
 import { joinPath, splitPath } from '../paths.ts';
 import type { Session } from '../session.ts';
@@ -44,6 +45,8 @@ export function decodeAuthority(authority: string): ServerRef {
 
 const CACHE_TTL_MS = 2_500;
 const MAX_INLINE_WRITE_BYTES = 1024 * 1024;
+const UPLOAD_PROGRESS_DELAY_MS = 1_000;
+const UPLOAD_PROGRESS_THROTTLE_MS = 100;
 
 interface CachedListing {
   at: number;
@@ -56,6 +59,56 @@ function toFileType(entry: DirectoryEntry): vscode.FileType {
     type |= vscode.FileType.SymbolicLink;
   }
   return type;
+}
+
+/**
+ * Runs an upload, putting a cancellable notification behind it once it has been going long
+ * enough to be worth interrupting the user for. Progress is reported as bytes handed to the
+ * socket, so a fast upload would otherwise flash a notification that is already at 100%.
+ */
+async function withUploadProgress(title: string, run: (options: UploadOptions) => Promise<void>): Promise<void> {
+  const controller = new AbortController();
+  let report: (value: { message?: string; increment?: number }) => void = () => undefined;
+  let lastPercent = 0;
+  let lastReportAt = 0;
+
+  const onProgress = (sent: number, total: number) => {
+    const now = Date.now();
+    if (sent < total && now - lastReportAt < UPLOAD_PROGRESS_THROTTLE_MS) {
+      return;
+    }
+    lastReportAt = now;
+
+    const percent = total > 0 ? Math.min(100, (sent / total) * 100) : 0;
+    const increment = Math.max(0, percent - lastPercent);
+    lastPercent = percent;
+    report({ message: `${formatBytes(sent)} / ${formatBytes(total)}`, increment });
+  };
+
+  const task = run({ onProgress, signal: controller.signal });
+  const settled = task.then(
+    () => undefined,
+    () => undefined,
+  );
+
+  const timer = setTimeout(() => {
+    void vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Calagopus: ${title}`, cancellable: true },
+      (progress, token) => {
+        report = (value) => progress.report(value);
+        token.onCancellationRequested(() => controller.abort());
+        return settled;
+      },
+    );
+  }, UPLOAD_PROGRESS_DELAY_MS);
+
+  try {
+    await task;
+  } catch (err) {
+    throw controller.signal.aborted ? new vscode.CancellationError() : err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function translateError(err: unknown, uri: vscode.Uri): Error {
@@ -264,11 +317,16 @@ export class CalagopusFileSystem implements vscode.FileSystemProvider {
       const client = await this.session.client(ref.origin);
 
       if (content.byteLength > MAX_INLINE_WRITE_BYTES) {
-        await client.uploadFile(ref.server, parent, name, content);
+        await withUploadProgress(`Saving ${name}`, (options) =>
+          client.uploadFile(ref.server, parent, name, content, options),
+        );
       } else {
         await client.writeFile(ref.server, uri.path, content);
       }
     } catch (err) {
+      if (err instanceof vscode.CancellationError) {
+        throw err;
+      }
       log.error(`fs write ${uri.toString()} failed: ${err}`);
       throw translateError(err, uri);
     }
