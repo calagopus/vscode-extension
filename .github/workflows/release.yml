@@ -91,6 +91,27 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Generate release notes
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          PREVIOUS_TAG="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
+          RANGE="${PREVIOUS_TAG:+$PREVIOUS_TAG..}HEAD"
+
+          {
+            echo "## What's Changed"
+            echo
+            git log --no-merges --format="- %s (%h)" "$RANGE"
+            if [ -n "$PREVIOUS_TAG" ]; then
+              echo
+              echo "**Full Changelog**: $REPO_URL/compare/$PREVIOUS_TAG...$VERSION"
+            fi
+          } > release-notes.md
 
       - name: Download vsix artifact
         uses: actions/download-artifact@v8
@@ -111,6 +132,6 @@ jobs:
         with:
           name: ${{ needs.check.outputs.version }}
           tag_name: ${{ needs.check.outputs.version }}
-          generate_release_notes: true
+          body_path: release-notes.md
           files: |
             dist/${{ env.PROJECT_NAME }}.vsix
