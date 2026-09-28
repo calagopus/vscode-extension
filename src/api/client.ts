@@ -8,6 +8,7 @@ import type {
   DirectoryListResponse,
   FileRevision,
   FileSearchFilters,
+  FileSearchResponse,
   Pagination,
   PowerAction,
   PublicSettings,
@@ -414,13 +415,13 @@ export class PanelClient {
     });
   }
 
-  async searchFiles(server: string, filters: FileSearchFilters): Promise<DirectoryEntry[]> {
-    const body = await this.json<{ entries: DirectoryEntry[] }>(`/api/client/servers/${server}/files/search`, {
+  async searchFiles(server: string, filters: FileSearchFilters): Promise<FileSearchResponse> {
+    const body = await this.json<FileSearchResponse>(`/api/client/servers/${server}/files/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(filters),
     });
-    return body.entries.filter((entry) => !isStagingUpload(entry));
+    return { ...body, entries: body.entries.filter((entry) => !isStagingUpload(entry)) };
   }
 
   async compress(server: string, root: string, files: string[], format: ArchiveFormat, name?: string): Promise<string> {

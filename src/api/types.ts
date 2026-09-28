@@ -110,6 +110,23 @@ export interface FileSearchFilters {
     include_unmatched: boolean;
     case_insensitive: boolean;
   } | null;
+  match_context?: { before: number; after: number; max_matches: number };
+}
+
+export interface ContentMatches {
+  file: string;
+  truncated: boolean;
+  blocks: {
+    start_line: number;
+    end_line: number;
+    content: string;
+    matches: { start_byte: number; end_byte: number }[];
+  }[];
+}
+
+export interface FileSearchResponse {
+  entries: DirectoryEntry[];
+  content_matches?: ContentMatches[];
 }
 
 export type ArchiveFormat =

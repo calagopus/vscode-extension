@@ -3,7 +3,7 @@
   "icon": "icon.png",
   "displayName": "Calagopus",
   "description": "Browse and edit Calagopus server files and access the server console directly from VS Code.",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "publisher": "calagopus",
   "license": "MIT",
   "repository": {
@@ -328,16 +328,16 @@
     "biome:fix-unsafe": "biome format --write --css-parse-tailwind-directives=true && biome lint --write --css-parse-tailwind-directives=true && biome check --write --unsafe"
   },
   "dependencies": {
-    "ws": "^8.21.1",
+    "ws": "^8.22.0",
     "y-protocols": "^1.0.7",
-    "yjs": "^13.6.31"
+    "yjs": "^13.6.33"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.16",
     "@types/node": "^20.19.43",
     "@types/vscode": "1.120.0",
     "@types/ws": "^8.18.1",
-    "esbuild": "^0.28.1",
+    "esbuild": "^0.28.2",
     "typescript": "^7.0.2"
   },
   "enabledApiProposals": [

@@ -1,11 +1,11 @@
 import * as vscode from 'vscode';
-import type { DirectoryEntry, FileSearchFilters } from '../api/types.ts';
+import { ApiError } from '../api/client.ts';
+import type { ContentMatches, FileSearchFilters, FileSearchResponse } from '../api/types.ts';
 import { decodeAuthority } from '../fs/fileSystemProvider.ts';
 import type { Session } from '../session.ts';
 
-const MAX_RESOLVE_FILE_SIZE = 256 * 1024;
-const MAX_RESOLVE_FILES = 64;
 const CONTENT_SEARCH_SIZE = Number.MAX_SAFE_INTEGER;
+const CONTEXT_MAX_MATCHES = 100;
 
 export function toGitGlobs(pattern: string): string[] {
   const match = pattern.match(/\{([^{}]*)\}/);
@@ -18,8 +18,29 @@ export function toGitGlobs(pattern: string): string[] {
     .flatMap((alt) => toGitGlobs(pattern.slice(0, match.index) + alt + pattern.slice(match.index! + match[0].length)));
 }
 
-function globPatternToString(glob: vscode.GlobPattern): string {
-  return typeof glob === 'string' ? glob : glob.pattern;
+function serverRelative(path: string): string {
+  return path.replace(/^\/+|\/+$/g, '');
+}
+
+function anchorGlob(base: string, glob: string, always: boolean): string {
+  const unanchored = glob.startsWith('**/') || !glob.replace(/\/+$/, '').includes('/');
+  if (!always && unanchored) {
+    return glob;
+  }
+
+  const relative = glob.replace(/^\/+/, '');
+  return base ? `${base}/${relative}` : `/${relative}`;
+}
+
+function serverGlobs(folder: vscode.Uri, glob: vscode.GlobPattern): string[] {
+  if (typeof glob === 'string') {
+    return toGitGlobs(glob).map((g) => anchorGlob(serverRelative(folder.path), g, false));
+  }
+  if (glob.baseUri.scheme !== folder.scheme || glob.baseUri.authority !== folder.authority) {
+    return [];
+  }
+
+  return toGitGlobs(glob.pattern).map((g) => anchorGlob(serverRelative(glob.baseUri.path), g, true));
 }
 
 function joinRoot(root: string, relative: string): string {
@@ -31,10 +52,19 @@ async function searchServer(
   session: Session,
   folder: vscode.Uri,
   filters: FileSearchFilters,
-): Promise<DirectoryEntry[]> {
+): Promise<FileSearchResponse> {
   const { origin, server } = decodeAuthority(folder.authority);
   const client = await session.client(origin);
-  return client.searchFiles(server, filters);
+  try {
+    return await client.searchFiles(server, filters);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 417) {
+      throw new Error(
+        `Calagopus: the server rejected an exclude pattern (from your exclude settings or a subuser ignore rule): ${err.message}`,
+      );
+    }
+    throw err;
+  }
 }
 
 export class CalagopusFileSearchProvider implements vscode.FileSearchProvider2 {
@@ -46,6 +76,7 @@ export class CalagopusFileSearchProvider implements vscode.FileSearchProvider2 {
     token: vscode.CancellationToken,
   ): Promise<vscode.Uri[]> {
     const results: vscode.Uri[] = [];
+    const needle = pattern.toLowerCase();
 
     for (const folder of options.folderOptions) {
       if (token.isCancellationRequested || results.length >= options.maxResults) {
@@ -56,13 +87,19 @@ export class CalagopusFileSearchProvider implements vscode.FileSearchProvider2 {
       }
 
       const root = folder.folder.path || '/';
-      const include = pattern ? [pattern.includes('/') ? `**/*${pattern}*` : `*${pattern}*`] : ['**'];
+      const includes = folder.includes.flatMap((glob) => serverGlobs(folder.folder, glob));
+      const filterLocally = pattern !== '' && includes.length > 0;
+      const include = filterLocally
+        ? includes
+        : pattern
+          ? [pattern.includes('/') ? `**/*${pattern}*` : `*${pattern}*`]
+          : ['**'];
 
-      const entries = await searchServer(this.session, folder.folder, {
+      const { entries } = await searchServer(this.session, folder.folder, {
         root,
         path_filter: {
-          include: [...include, ...folder.includes.flatMap(toGitGlobs)],
-          exclude: folder.excludes.map(globPatternToString).flatMap(toGitGlobs),
+          include,
+          exclude: folder.excludes.flatMap((glob) => serverGlobs(folder.folder, glob)),
           case_insensitive: true,
         },
         size_filter: null,
@@ -72,6 +109,13 @@ export class CalagopusFileSearchProvider implements vscode.FileSearchProvider2 {
       for (const entry of entries) {
         if (!entry.file) {
           continue;
+        }
+        if (filterLocally) {
+          const name = entry.name.toLowerCase();
+          const haystack = pattern.includes('/') ? name : name.slice(name.lastIndexOf('/') + 1);
+          if (!haystack.includes(needle)) {
+            continue;
+          }
         }
         results.push(folder.folder.with({ path: joinRoot(root, entry.name) }));
         if (results.length >= options.maxResults) {
@@ -93,9 +137,12 @@ export class CalagopusTextSearchProvider implements vscode.TextSearchProvider2 {
     progress: vscode.Progress<vscode.TextSearchResult2>,
     token: vscode.CancellationToken,
   ): Promise<vscode.TextSearchComplete2> {
+    if (query.isRegExp) {
+      throw new Error('Calagopus: regular expression search is not supported, turn off regex mode.');
+    }
+
     let limitHit = false;
     let reported = 0;
-    let resolvedFiles = 0;
 
     for (const folder of options.folderOptions) {
       if (token.isCancellationRequested) {
@@ -106,50 +153,48 @@ export class CalagopusTextSearchProvider implements vscode.TextSearchProvider2 {
       }
 
       const root = folder.folder.path || '/';
+      const includes = folder.includes.flatMap((glob) => serverGlobs(folder.folder, glob));
+      const excludes = folder.excludes.flatMap((glob) => serverGlobs(folder.folder, glob));
 
-      const contentFilter = query.isRegExp
-        ? null
-        : {
-            query: query.pattern,
-            max_search_size: CONTENT_SEARCH_SIZE,
-            include_unmatched: false,
-            case_insensitive: !query.isCaseSensitive,
-          };
-
-      const entries = await searchServer(this.session, folder.folder, {
+      const { entries, content_matches } = await this.search(folder.folder, {
         root,
         path_filter:
-          folder.includes.length > 0 || folder.excludes.length > 0
-            ? {
-                include: folder.includes.flatMap(toGitGlobs),
-                exclude: folder.excludes.map(globPatternToString).flatMap(toGitGlobs),
-                case_insensitive: true,
-              }
-            : query.isRegExp
-              ? { include: ['**'], exclude: [], case_insensitive: true }
-              : null,
-        size_filter: query.isRegExp ? { min: 0, max: MAX_RESOLVE_FILE_SIZE } : null,
-        content_filter: contentFilter,
+          includes.length > 0 || excludes.length > 0
+            ? { include: includes, exclude: excludes, case_insensitive: true }
+            : null,
+        size_filter: null,
+        content_filter: {
+          query: query.pattern,
+          max_search_size: CONTENT_SEARCH_SIZE,
+          include_unmatched: false,
+          case_insensitive: !query.isCaseSensitive,
+        },
+        match_context: {
+          before: 0,
+          after: 0,
+          max_matches: Math.max(1, Math.min(options.maxResults, CONTEXT_MAX_MATCHES)),
+        },
       });
+      if (!content_matches) {
+        throw new Error('Calagopus: the node running this server is too old for content search.');
+      }
+
+      const contentMatches = new Map(content_matches.map((matches) => [matches.file, matches]));
 
       for (const entry of entries) {
         if (token.isCancellationRequested || reported >= options.maxResults) {
           limitHit = limitHit || reported >= options.maxResults;
           break;
         }
-        if (!entry.file || entry.size > MAX_RESOLVE_FILE_SIZE) {
+
+        const context = contentMatches.get(entry.name);
+        if (!entry.file || !context) {
           continue;
         }
-        if (resolvedFiles >= MAX_RESOLVE_FILES) {
-          limitHit = true;
-          break;
-        }
 
+        limitHit = limitHit || context.truncated;
         const uri = folder.folder.with({ path: joinRoot(root, entry.name) });
-        resolvedFiles++;
-
-        const matches = await this.resolveMatches(uri, query, options, token);
-        for (const match of matches) {
+        for (const match of contextMatches(uri, context, query, options)) {
           progress.report(match);
           if (++reported >= options.maxResults) {
             limitHit = true;
@@ -162,92 +207,109 @@ export class CalagopusTextSearchProvider implements vscode.TextSearchProvider2 {
     return { limitHit };
   }
 
-  private async resolveMatches(
-    uri: vscode.Uri,
-    query: vscode.TextSearchQuery2,
-    options: vscode.TextSearchProviderOptions,
-    token: vscode.CancellationToken,
-  ): Promise<vscode.TextSearchMatch2[]> {
-    let text: string;
+  private async search(folder: vscode.Uri, filters: FileSearchFilters): Promise<FileSearchResponse> {
     try {
-      const bytes = await vscode.workspace.fs.readFile(uri);
-      text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-    } catch {
-      return [];
-    }
-
-    const matcher = buildMatcher(query);
-    if (!matcher) {
-      return [];
-    }
-
-    const maxPreview = options.previewOptions?.charsPerLine ?? 250;
-    const matches: vscode.TextSearchMatch2[] = [];
-
-    const lines = text.split(/\r?\n/);
-    for (let lineNo = 0; lineNo < lines.length; lineNo++) {
-      if (token.isCancellationRequested) {
-        break;
+      return await searchServer(this.session, folder, filters);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) {
+        throw new Error('Calagopus: content search needs the files.read-content permission on this server.');
       }
-
-      const line = lines[lineNo];
-      for (const [start, end] of matcher(line)) {
-        const previewText = line.slice(0, maxPreview);
-        matches.push(
-          new vscode.TextSearchMatch2(
-            uri,
-            [
-              {
-                sourceRange: new vscode.Range(lineNo, start, lineNo, end),
-                previewRange: new vscode.Range(0, Math.min(start, maxPreview), 0, Math.min(end, maxPreview)),
-              },
-            ],
-            previewText,
-          ),
-        );
+      if (err instanceof ApiError && err.status === 400) {
+        throw new Error(`Calagopus: content search was refused: ${err.message}`);
       }
+      throw err;
     }
-
-    return matches;
   }
 }
 
-function buildMatcher(query: vscode.TextSearchQuery2): ((line: string) => [number, number][]) | null {
-  if (query.isRegExp) {
-    let regex: RegExp;
-    try {
-      regex = new RegExp(query.pattern, query.isCaseSensitive ? 'g' : 'gi');
-    } catch {
-      return null;
+function lineMatch(
+  uri: vscode.Uri,
+  line: string,
+  lineNo: number,
+  start: number,
+  end: number,
+  options: vscode.TextSearchProviderOptions,
+): vscode.TextSearchMatch2 {
+  const maxPreview = options.previewOptions?.charsPerLine ?? 250;
+  return new vscode.TextSearchMatch2(
+    uri,
+    [
+      {
+        sourceRange: new vscode.Range(lineNo, start, lineNo, end),
+        previewRange: new vscode.Range(0, Math.min(start, maxPreview), 0, Math.min(end, maxPreview)),
+      },
+    ],
+    line.slice(0, maxPreview),
+  );
+}
+
+function contextMatches(
+  uri: vscode.Uri,
+  context: ContentMatches,
+  query: vscode.TextSearchQuery2,
+  options: vscode.TextSearchProviderOptions,
+): vscode.TextSearchMatch2[] {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  const out: vscode.TextSearchMatch2[] = [];
+
+  for (const block of context.blocks) {
+    const bytes = encoder.encode(block.content);
+    const lineStarts = [0];
+    for (let i = 0; i < bytes.length; i++) {
+      if (bytes[i] === 0x0a) {
+        lineStarts.push(i + 1);
+      }
     }
 
-    return (line) => {
-      const out: [number, number][] = [];
-      for (const m of line.matchAll(regex)) {
-        if (m[0].length === 0) {
-          break;
-        }
-        out.push([m.index, m.index + m[0].length]);
+    const position = (byte: number): [number, number] => {
+      let line = 0;
+      while (line + 1 < lineStarts.length && lineStarts[line + 1] <= byte) {
+        line++;
       }
-      return out;
+      return [line, decoder.decode(bytes.subarray(lineStarts[line], byte)).length];
     };
+    const lineText = (line: number) =>
+      decoder.decode(bytes.subarray(lineStarts[line], lineStarts[line + 1] ?? bytes.length)).replace(/\r?\n$/, '');
+
+    for (const span of block.matches) {
+      const [startLine, startCol] = position(span.start_byte);
+      const [endLine, endCol] = position(span.end_byte);
+      const line = lineText(startLine);
+      const lineNo = block.start_line - 1 + startLine;
+
+      if (startLine === endLine) {
+        if (!query.isWordMatch || isWordBounded(line, startCol, endCol)) {
+          out.push(lineMatch(uri, line, lineNo, startCol, endCol, options));
+        }
+        continue;
+      }
+
+      const lastLine = lineText(endLine);
+      if (query.isWordMatch && !(isWordBounded(line, startCol, line.length) && isWordBounded(lastLine, 0, endCol))) {
+        continue;
+      }
+
+      const preview = Array.from({ length: endLine - startLine + 1 }, (_, i) => lineText(startLine + i)).join('\n');
+      out.push(
+        new vscode.TextSearchMatch2(
+          uri,
+          [
+            {
+              sourceRange: new vscode.Range(lineNo, startCol, block.start_line - 1 + endLine, endCol),
+              previewRange: new vscode.Range(0, startCol, endLine - startLine, endCol),
+            },
+          ],
+          preview,
+        ),
+      );
+    }
   }
 
-  const needle = query.isCaseSensitive ? query.pattern : query.pattern.toLowerCase();
-  const wordBoundary = (line: string, start: number, end: number) => {
-    const isWord = (ch: string | undefined) => ch !== undefined && /\w/.test(ch);
-    return !isWord(line[start - 1]) && !isWord(line[end]);
-  };
+  return out;
+}
 
-  return (line) => {
-    const haystack = query.isCaseSensitive ? line : line.toLowerCase();
-    const out: [number, number][] = [];
-    for (let idx = haystack.indexOf(needle); idx !== -1; idx = haystack.indexOf(needle, idx + 1)) {
-      const end = idx + needle.length;
-      if (!query.isWordMatch || wordBoundary(line, idx, end)) {
-        out.push([idx, end]);
-      }
-    }
-    return out;
-  };
+function isWordBounded(line: string, start: number, end: number): boolean {
+  const isWord = (ch: string | undefined) => ch !== undefined && /\w/.test(ch);
+  return !isWord(line[start - 1]) && !isWord(line[end]);
 }
