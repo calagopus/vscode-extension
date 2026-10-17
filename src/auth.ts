@@ -38,6 +38,15 @@ function applyPermissionParams(target: URL): void {
   target.searchParams.set('server_permissions', CREATE_KEY_SERVER_PERMISSIONS.join(','));
 }
 
+async function openWithCallback(target: URL, callback: { url: string; state: string }): Promise<void> {
+  const external = await vscode.env.asExternalUri(vscode.Uri.parse(callback.url));
+  const callbackUrl = new URL(external.toString(true));
+  callbackUrl.searchParams.set('state', callback.state);
+  target.searchParams.set('callback_url', callbackUrl.toString());
+
+  await vscode.env.openExternal(target.toString() as unknown as vscode.Uri);
+}
+
 export async function provisionApiKey(origin: string): Promise<string | null> {
   const callback = await startCallbackServer({
     requireKey: true,
@@ -50,15 +59,12 @@ export async function provisionApiKey(origin: string): Promise<string | null> {
   });
 
   try {
-    const external = await vscode.env.asExternalUri(vscode.Uri.parse(callback.url));
-
     const target = new URL(CREATE_KEY_PATH, origin);
     target.searchParams.set('name', CREATE_KEY_NAME);
     applyPermissionParams(target);
-    target.searchParams.set('callback_url', external.toString());
 
     log.info(`auth: redirecting to ${target.origin}${target.pathname} to create an API key`);
-    await vscode.env.openExternal(vscode.Uri.parse(target.toString()));
+    await openWithCallback(target, callback);
 
     return await awaitKey(origin, callback.result);
   } finally {
@@ -78,15 +84,12 @@ export async function requestApiKeyPermissions(origin: string, keyStart: string)
   });
 
   try {
-    const external = await vscode.env.asExternalUri(vscode.Uri.parse(callback.url));
-
     const target = new URL(UPDATE_KEY_PATH, origin);
     target.searchParams.set('key_start', keyStart);
     applyPermissionParams(target);
-    target.searchParams.set('callback_url', external.toString());
 
     log.info(`auth: redirecting to ${target.origin}${target.pathname} to update the permissions of ${keyStart}`);
-    await vscode.env.openExternal(vscode.Uri.parse(target.toString()));
+    await openWithCallback(target, callback);
 
     return await awaitUpdate(origin, callback.result);
   } finally {
@@ -148,7 +151,7 @@ async function awaitKey(origin: string, fromCallback: Promise<string | null>): P
 function startCallbackServer(options: {
   requireKey: boolean;
   okPage: string;
-}): Promise<{ url: string; result: Promise<string | null>; dispose: () => void }> {
+}): Promise<{ url: string; state: string; result: Promise<string | null>; dispose: () => void }> {
   return new Promise((resolve, reject) => {
     let deliver!: (value: string | null) => void;
     const result = new Promise<string | null>((res) => {
@@ -185,7 +188,8 @@ function startCallbackServer(options: {
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address() as AddressInfo;
       resolve({
-        url: `http://127.0.0.1:${port}/?state=${state}`,
+        url: `http://127.0.0.1:${port}/`,
+        state,
         result,
         dispose: () => {
           deliver(null);
